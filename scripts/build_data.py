@@ -156,10 +156,13 @@ def load_odds(upcoming, players_by_norm):
     min_left = int(os.environ.get("ODDS_MIN_REMAINING", "30"))
     base = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl"
     try:
-        raw, _ = fetch(f"{base}/events?apiKey={key}")  # free call
+        raw, ehdr = fetch(f"{base}/events?apiKey={key}")  # free call
         events = json.loads(raw)
+        eh = {k.lower(): v for k, v in ehdr.items()}
+        state["remaining"] = eh.get("x-requests-remaining", state.get("remaining"))
+        state["used"] = eh.get("x-requests-used", state.get("used"))
     except Exception as e:
-        note("odds", "error", f"events: {e}")
+        note("odds", "error", f"events: {str(e).replace(key, '***')}")
         return props, state
     # drop stale lines (games already started)
     lines = [l for l in props.get("lines", []) if l.get("commence") and datetime.fromisoformat(l["commence"].replace("Z", "+00:00")) > NOW - timedelta(hours=4)]
@@ -169,7 +172,7 @@ def load_odds(upcoming, players_by_norm):
         if ct < NOW or ct > NOW + timedelta(hours=window_h):
             continue
         es = state["events"].setdefault(ev["id"], {"fetches": 0})
-        if es["fetches"] >= per_event:
+        if es["fetches"] >= per_event or es.get("empty", 0) >= 6:
             continue
         if state.get("remaining") is not None and int(state["remaining"]) < min_left:
             note("odds", "budget", f"only {state['remaining']} credits left - skipping")
@@ -181,12 +184,17 @@ def load_odds(upcoming, players_by_norm):
         except urllib.error.HTTPError as e:
             note("odds", "error", f"{ev['id']}: HTTP {e.code}"); continue
         except Exception as e:
-            note("odds", "error", f"{ev['id']}: {e}"); continue
+            note("odds", "error", f"{ev['id']}: {str(e).replace(key, '***')}"); continue
         h = {k.lower(): v for k, v in hdr.items()}
         state["remaining"] = h.get("x-requests-remaining", state.get("remaining"))
         state["used"] = h.get("x-requests-used", state.get("used"))
-        es["fetches"] += 1; es["last"] = NOW.isoformat(); fetched += 1
+        es["last"] = NOW.isoformat()
         data = json.loads(raw)
+        if not any(bk.get("markets") for bk in data.get("bookmakers", [])):
+            # books haven't posted props yet (costs 0 credits) - retry on a later run
+            es["empty"] = es.get("empty", 0) + 1
+            continue
+        es["fetches"] += 1; fetched += 1
         home = TEAM_NAMES.get(data.get("home_team")); away = TEAM_NAMES.get(data.get("away_team"))
         lines = [l for l in lines if l["event"] != ev["id"]]
         agg = {}
