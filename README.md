@@ -35,6 +35,9 @@ Without the odds key the app still works: it uses **model lines** (the .5 line c
 
 Budget guard: each game's props (7 markets, ~7 credits) are fetched **once**, ~30 h before kickoff, and fetching stops if fewer than 30 credits remain — about 450 credits/month in season. Tunable via env vars `ODDS_WINDOW_HOURS`, `ODDS_FETCHES_PER_EVENT`, `ODDS_MIN_REMAINING` in the workflow (raise fetches per event only on a paid plan).
 
+## Optional Discord alerts
+Add a repo secret `DISCORD_WEBHOOK_URL` (Discord → channel settings → Integrations → Webhooks) to get a message whenever new sportsbook lines are loaded.
+
 ## Refresh schedule
 `.github/workflows/refresh.yml` runs at 12:00, 18:00 and 23:00 UTC (≈7 AM, 1 PM, 6 PM Eastern), commits `docs/data/*.json`, and redeploys Pages. Run it any time from the Actions tab.
 

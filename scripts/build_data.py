@@ -222,6 +222,25 @@ def load_odds(upcoming, players_by_norm):
     note("odds", "ok", f"fetched {fetched} events; credits remaining {state.get('remaining')}")
     return props, state
 
+# ---------------- alerts ----------------
+def alert_new_lines(props, prev_count, players):
+    """Optional: post to a Discord webhook when new sportsbook lines are loaded."""
+    hook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    lines = props.get("lines", [])
+    if not hook or not props.get("updated") or props["updated"] != NOW.isoformat():
+        return
+    new_events = sorted({(l["away"], l["home"]) for l in lines if l.get("away")})
+    site = os.environ.get("SITE_URL", "https://aaugustin67-dotcom.github.io/propscout/")
+    msg = (f"**PropScout:** new prop lines loaded ({len(lines)} lines) for " +
+           ", ".join(f"{a} @ {h}" for a, h in new_events[:16]) + f"\nTop picks: {site}")
+    try:
+        req = urllib.request.Request(hook, data=json.dumps({"content": msg[:1900]}).encode(),
+                                     headers={"Content-Type": "application/json", "User-Agent": "PropScout/1.0"})
+        urllib.request.urlopen(req, timeout=20).read()
+        note("discord", "ok", "alert sent")
+    except Exception as e:
+        note("discord", "error", str(e))
+
 # ---------------- main ----------------
 def main():
     sched = load_schedule()
@@ -284,7 +303,9 @@ def main():
     for pid, p in players.items():
         if p["last"][0] == cur or pid not in by_norm.values():
             by_norm.setdefault(norm(p["name"]), pid)
+    prev_count = len(load_json(os.path.join(OUT, "props.json"), {"lines": []}).get("lines", []))
     props, ostate = load_odds(upcoming, by_norm)
+    alert_new_lines(props, prev_count, players)
 
     save("stats.json", {"season": cur, "cols": ["season", "week", "game", "team", "opp", "home"] + STAT_COLS,
                         "players": players, "logs": logs})
