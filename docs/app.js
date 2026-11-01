@@ -79,6 +79,62 @@ async function load(){
 }
 function injuryOf(p){ const i=S.injByName[norm(p.name)+'|'+p.team]; return i && !/^active/i.test(i.status||'') ? i : null; }
 
+/* ---------- key injuries around a player ----------
+   Own team: who competes with / feeds him.  Opponent: who covers him.
+   Only Out / Doubtful / Questionable / IR, and only "key" players (season snap share
+   above a starter threshold, from nflverse snap counts). */
+const KI_STATUS = /^(out|doubtful|questionable|injured reserve)/i;
+const KI_OWN = {QB:['WR','TE','OL'], RB:['RB','OL'], WR:['WR','TE','QB'], TE:['TE','WR','QB']};
+const KI_OPP = {QB:['DL','CB','S'], RB:['DL','LB'], WR:['CB','S'], TE:['LB','S']};
+/* score points for the OVER side per fresh Out/Doubtful/IR key player (Questionable = 40%).
+   Positive = helps his volume or matchup. */
+const KI_PTS = {
+  own:{ QB:{WR:-1.5,TE:-1,OL:-1}, RB:{RB:+4,OL:-1}, WR:{WR:+3,TE:+1.5,QB:-4}, TE:{TE:+3,WR:+2,QB:-4} },
+  opp:{ QB:{DL:+1,CB:+1.5,S:+1}, RB:{DL:+1,LB:+1.5}, WR:{CB:+2.5,S:+1}, TE:{LB:+1.5,S:+1.5} },
+};
+const KI_LAB = {own:'teammate', opp:'defender'};
+const kiW = st => /^questionable/i.test(st||'') ? .4 : 1;
+const kiShort = st => /^injured/i.test(st)?'IR':/^out/i.test(st)?'Out':/^doubt/i.test(st)?'D':/^quest/i.test(st)?'Q':st;
+const kiCls = st => /^questionable/i.test(st||'')?'a':'r';
+const _ki = {};
+function keyInj(pid){
+  if(_ki[pid]) return _ki[pid];
+  const p=S.players[pid]; const pos=p?.pos==='FB'?'RB':p?.pos; const st=S.slateTeam[p?.team];
+  const res={own:[], opp:[], pts:0, notes:[]};
+  if(!p || !KI_OWN[pos]) return (_ki[pid]=res);
+  const pick=(team, grps, side)=>(S.injByTeam[team]||[]).filter(i=>i.key && grps.includes(i.grp) && KI_STATUS.test(i.status||'')
+      && !(side==='own' && norm(i.name)===norm(p.name)))
+    .map(i=>({...i, side, pts: i.fresh ? (KI_PTS[side][pos][i.grp]||0)*kiW(i.status) : 0}))
+    .sort((a,b)=>Math.abs(b.pts)-Math.abs(a.pts) || (b.snap||0)-(a.snap||0));
+  res.own = pick(p.team, KI_OWN[pos], 'own');
+  if(st) res.opp = pick(st.opp, KI_OPP[pos], 'opp');
+  let t=0; for(const i of [...res.own,...res.opp]) t+=i.pts;
+  res.pts = Math.max(-8, Math.min(8, r1(t)));
+  for(const i of [...res.own,...res.opp]) if(i.pts) res.notes.push({t:`${i.side==='own'?p.team:st.opp} ${i.grp} ${i.name} ${kiShort(i.status)} (${Math.round((i.snap||0)*100)}% snaps)`, v:i.pts});
+  return (_ki[pid]=res);
+}
+const kiAll = k => [...k.own, ...k.opp];
+const kiLine = i => `${esc(i.name)} ${esc(i.grp)} ${kiShort(i.status)}${i.fresh?'':' (long-term)'}`;
+function warnIcon(pid){
+  const k=keyInj(pid), all=kiAll(k); if(!all.length) return '';
+  const tip = all.map(i=>`${i.side==='own'?S.players[pid].team:S.slateTeam[S.players[pid].team]?.opp}: ${i.name} (${i.grp}) – ${i.status}${i.fresh?'':', long-term'}`).join('\n');
+  return `<span class="warn" tabindex="0" role="button" aria-label="${esc(tip)}">⚠️<span class="tip">${all.map(i=>`<span><i class="pill ${kiCls(i.status)}">${kiShort(i.status)}</i> ${esc(i.side==='own'?S.players[pid].team:S.slateTeam[S.players[pid].team]?.opp)} ${esc(i.grp)} <b>${esc(i.name)}</b>${i.fresh?'':' <em>long-term</em>'}</span>`).join('')}</span></span>`;
+}
+function kiCompact(pid){
+  const k=keyInj(pid), p=S.players[pid], opp=S.slateTeam[p.team]?.opp; if(!kiAll(k).length) return '';
+  const part=(arr,lab)=>arr.length?`<div><span class="mut">${lab}:</span> ${arr.slice(0,3).map(i=>`<span class="kit ${kiCls(i.status)}">${kiLine(i)}</span>`).join(' ')}${arr.length>3?` <span class="mut">+${arr.length-3}</span>`:''}</div>`:'';
+  return `<div class="ki small"><b>🩹 Key injuries${k.pts?` <span class="pill ${k.pts>0?'g':'r'}">${k.pts>0?'+':''}${k.pts} over</span>`:''}</b>${part(k.own,p.team)}${part(k.opp,opp?opp+' D':'Opp D')}</div>`;
+}
+function kiPanel(pid){
+  const k=keyInj(pid), p=S.players[pid], opp=S.slateTeam[p.team]?.opp, pos=p.pos==='FB'?'RB':p.pos;
+  if(!KI_OWN[pos]) return '';
+  const list=(arr,side)=>arr.length?arr.map(i=>`<div class="row small" style="padding:3px 0"><span class="pill ${kiCls(i.status)}">${esc(i.status)}</span><b>${esc(i.name)}</b><span class="mut">${esc(i.pos||i.grp)} · ${Math.round((i.snap||0)*100)}% snaps${i.fresh?'':' · long-term (already in recent stats)'}</span><span class="sp"></span>${i.pts?`<span class="pill ${i.pts*(side==='opp'?1:1)>0?'g':'r'}">${i.pts>0?'+':''}${r1(i.pts)}</span>`:''}</div>`).join(''):'<div class="mut small">None</div>';
+  return `<h2>Key injuries</h2><div class="grid g2">
+   <div class="card"><div class="small mut" style="margin-bottom:4px">${p.team} at ${KI_OWN[pos].join('/')} (usage & volume)</div>${list(k.own,'own')}</div>
+   <div class="card"><div class="small mut" style="margin-bottom:4px">${opp?opp+' defense':'Opponent'} at ${KI_OPP[pos].join('/')} (who covers him)</div>${opp?list(k.opp,'opp'):'<div class="mut small">No game this week</div>'}</div></div>
+   <p class="small mut">Key = season snap share above a starter threshold (nflverse snap counts). Score adjustment for the Over (reversed for the Under): ${k.pts>0?'+':''}${k.pts} pts, from fresh absences only — players already out for weeks are labeled long-term because his recent stats already reflect them. Questionable counts 40%. Capped at ±8.</p>`;
+}
+
 /* ---------- defense vs position ---------- */
 function buildDvP(){
   const season = S.stats.season, agg = {}, off = {}; // team -> pos -> {games:Set, sums}
@@ -194,7 +250,8 @@ function score(a){
   const match = a.dvp ? (a.side>0 ? (a.dvp.rank-1)/31 : (32-a.dvp.rank)/31) : .5;
   const parts = {L10:hr('L10')??.5, L5:hr('L5')??.5, SZN:szn, H2H:h2h, EDGE:edge, MATCH:match};
   let t=0; for(const k in W) t+=W[k]*parts[k];
-  return {score:Math.round(t*100), parts};
+  const ki = a.pid ? keyInj(a.pid) : null, adj = ki ? ki.pts * (a.side>0?1:-1) : 0;
+  return {score:Math.max(0,Math.min(100,Math.round(t*100+adj))), parts, inj:adj};
 }
 function reasons(a, p){
   const M = MK[a.m], side = a.side>0?'Over':'Under', out=[];
@@ -206,6 +263,7 @@ function reasons(a, p){
     out.push(`${a.opp} allows ${a.dvp.v} ${M.label.toLowerCase()}/game to ${pos}s — ${ordinal(33-a.dvp.rank)} most (${soft?'soft':tough?'tough':'average'} matchup)`); }
   if(a.H2H && a.H2H.n) out.push(`vs ${a.opp} since 2024: ${f(a.H2H)}`);
   if(a.VENUE && a.VENUE.n>=3) out.push(`${a.isHome?'Home':'Away'} games (2 seasons): ${f(a.VENUE)}`);
+  { const k=keyInj(a.pid); if(k.pts){ const adj=k.pts*(a.side>0?1:-1); const sg=a.side>0?1:-1; out.push(`🩹 Injuries ${adj>0?'+':''}${r1(adj)} pts: ${k.notes.map(n=>`${n.t} ${n.v*sg>0?'+':''}${r1(n.v*sg)}`).join('; ')}`); } }
   if(a.streak>=3) out.push(a.m==='anytime_td'?`🔥 Scored in ${a.streak} straight games`:`🔥 ${a.streak}-game ${side.toLowerCase()} streak`);
   return out;
 }
@@ -295,12 +353,13 @@ function propCard(row, side, rank){
   const fav = isFav(row.pid,row.m,side);
   return `<div class="card pick">
     ${rank?`<div class="rank">#${rank}</div>`:''}
-    <div class="row">${headshot(p)}<div class="sp"><a class="pname" href="#/player/${row.pid}?m=${row.m}">${esc(p.name)}</a>
+    <div class="row">${headshot(p)}<div class="sp"><a class="pname" href="#/player/${row.pid}?m=${row.m}">${esc(p.name)}</a>${warnIcon(row.pid)}
       <div class="small mut">${p.pos} · ${p.team} ${a.isHome?'vs':'@'} ${a.opp} · ${fmtTime(row.g.ko)}</div></div>
       <button class="star ${fav?'on':''}" data-fav="${row.pid}|${row.m}|${row.line}|${side}" title="Watchlist">★</button></div>
     <div class="row" style="margin-top:10px"><span class="side ${side>0?'o':'u'}">${sideTxt}</span><b class="big" style="font-size:18px">${row.m==='anytime_td'?'':row.line} ${M.label}</b><span class="sp"></span>${priceStr(row,side)}</div>
     <div style="margin-top:10px">${hrChips(a)}</div>
     <div class="row small" style="margin-top:8px;flex-wrap:wrap;gap:6px">${dvpPill(a,p)} ${injPill(row.inj)} <span class="pill">L10 avg ${a.avgL10!=null?r1(a.avgL10):'–'}</span>${a.streak>=3?`<span class="pill g">🔥 ${a.streak} straight</span>`:''}</div>
+    ${kiCompact(row.pid)}
     <div class="row" style="margin-top:10px"><div class="sp"><div class="small mut">PropScout score</div><div class="scorebar"><i style="width:${sc.score}%"></i></div></div><div class="score">${sc.score}</div>
       <button class="btn" data-slip="${row.pid}|${row.m}|${row.line}|${side}">+ Slip</button></div>
   </div>`;
@@ -342,7 +401,7 @@ function viewHome(){
   return `<h1>Today's Top Picks</h1>
   <p class="sub">${slateTxt}. Ranked by the PropScout score — every input is shown so you can judge it yourself.</p>
   <details class="card small" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700">How the score works</summary>
-   <p class="mut">Score (0–100) = 25% last-10 hit rate + 20% last-5 + 15% season + 10% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 15% cushion (last-10 average vs the line) + 15% matchup (how much this defense allows to the position, ranked 1–32 from this season's games). Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
+   <p class="mut">Score (0–100) = 25% last-10 hit rate + 20% last-5 + 15% season + 10% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 15% cushion (last-10 average vs the line) + 15% matchup (how much this defense allows to the position, ranked 1–32 from this season's games). Then a small <b>key-injury adjustment</b> (capped ±8): e.g. +3 when a starting WR teammate is out, +4 when the other RB is out, −4 when his QB is out, +2.5 when the opponent's starting CB is out; Questionable counts 40%, and only fresh absences count. It's listed in each pick's reasons, and ⚠️ next to a name shows the key injuries around him. Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
   ${slateStrip()}
   <div class="tabs" id="htabs">${[['all','All'],['over','Overs'],['under','Unders'],...BOARD_MK.map(m=>[m,MK[m].label])].map(([k,l])=>`<button data-h="${k}" class="${HS.f===k?'on':''}">${l}</button>`).join('')}</div>
   ${top.length?`<div class="grid g2">${top.map((x,i)=>propWithWhy(x,i+1)).join('')}</div>`:`<div class="empty card">No picks available — the slate may be finished. Check back after the next data refresh.</div>`}
@@ -436,7 +495,7 @@ function viewPlayer(pid, params){
   PS.src=L?.src;
   const inj=injuryOf(p), st=S.slateTeam[p.team];
   return `<div class="row" style="gap:14px;flex-wrap:wrap">${headshot(p).replace('class="hs"','class="hs lg"')}
-    <div class="sp"><h1 style="margin:0">${esc(p.name)}</h1>
+    <div class="sp"><h1 style="margin:0">${esc(p.name)} ${warnIcon(pid)}</h1>
     <div class="mut">${p.pos} · ${p.team} ${st?`· Next: ${st.home?'vs':'@'} ${st.opp} ${fmtTime(st.g.ko)}`:'· No game on this week\'s slate'}</div>
     <div class="row small" style="margin-top:6px;gap:6px">${injPill(inj)}${inj?`<span class="mut">${esc(inj.detail)}</span>`:''}</div></div></div>
   <div class="tabs">${mks.map(k=>`<button data-m="${k}" class="${k===m?'on':''}">${MK[k].label}${S.lines[pid+'|'+k]?' •':''}</button>`).join('')}</div>
@@ -474,7 +533,7 @@ function renderPlayer(){
    <div class="seg" id="pwin">${[['5','L5'],['10','L10'],['20','L20'],['SZN','Season'],['H2H','H2H']].map(([k,l])=>`<button data-w="${k}" class="${String(PS.win)===k?'on':''}">${l}</button>`).join('')}</div></div>${chart}
    <div class="legend"><span><b style="color:var(--green)">■</b> ${PS.side>0?'over':'under'} hit</span><span><b style="color:var(--red)">■</b> miss</span><span>- - line</span></div>`;
   // extra panels
-  $('#pextra').innerHTML = [matchupPanel(a,p), booksPanel(pid,m), teammatePanel(pid), splitsPanel(a,p), gameLog(a,p)].join('');
+  $('#pextra').innerHTML = [kiPanel(pid), matchupPanel(a,p), booksPanel(pid,m), teammatePanel(pid), splitsPanel(a,p), gameLog(a,p)].join('');
   bindPlayerExtra();
 }
 function barChart(games, f, line){
@@ -532,7 +591,7 @@ function teammatePanel(pid){
     const v=volume(t.id); return {t, v, w:v.att*0.6+v.car+v.tgt*1.2, inj:injuryOf(t)}; }).filter(x=>x.v.gp>=2 && x.w>=4).sort((a,b)=>b.w-a.w).slice(0,10);
   if(!mates.length) return '';
   return `<h2>Teammate out filter</h2><div class="card"><p class="small mut" style="margin-top:0">Recalculate hit rates using only games where the selected teammate(s) did not record a stat (didn't play or had no touches). Uses ${season-2}–${season} games.</p>
-   <div class="chips">${mates.map(x=>`<button class="btn ${PS.without.includes(x.t.id)?'on':''}" data-without="${x.t.id}">${esc(x.t.name)} <span class="mut">${x.t.pos}</span>${x.inj?` <span class="pill ${BAD_STATUS.test(x.inj.status)?'r':'a'}">${esc(x.inj.status)}</span>`:''}</button>`).join('')}</div></div>`;
+   <div class="chips">${mates.map(x=>`<button class="btn ${PS.without.includes(x.t.id)?'on':''}" data-without="${x.t.id}">${esc(x.t.name)} <span class="mut">${x.t.pos}</span>${warnIcon(x.t.id)}${x.inj?` <span class="pill ${BAD_STATUS.test(x.inj.status)?'r':'a'}">${esc(x.inj.status)}</span>`:''}</button>`).join('')}</div></div>`;
 }
 function splitsPanel(a,p){
   const f=MK[a.m].f, s=S.stats.season, G=a.games;
@@ -605,7 +664,7 @@ function viewTrending(){
   }
   streaks.sort((x,y)=>y.a.streak-x.a.streak); up.sort((x,y)=>y.d-x.d); down.sort((x,y)=>x.d-y.d);
   const favCount={}; FAV.forEach(f=>{const k=f.pid+'|'+f.m; favCount[k]=(favCount[k]||0)+1;});
-  const tr=(x,txt)=>`<tr><td><a href="#/player/${x.r.pid}?m=${x.r.m}"><b>${esc(x.r.p.name)}</b></a> <span class="mut small">${x.r.p.pos} ${x.r.p.team}</span></td><td>${MK[x.r.m].label}</td><td>${txt}</td></tr>`;
+  const tr=(x,txt)=>`<tr><td><a href="#/player/${x.r.pid}?m=${x.r.m}"><b>${esc(x.r.p.name)}</b></a>${warnIcon(x.r.pid)} <span class="mut small">${x.r.p.pos} ${x.r.p.team}</span></td><td>${MK[x.r.m].label}</td><td>${txt}</td></tr>`;
   return `<h1>Trending</h1><p class="sub">Hot streaks and usage shifts on this week's slate.</p>
   <div class="grid g2">
    <div><h2>🔥 Longest active streaks vs line</h2><div class="tbl"><table><tr><th>Player</th><th>Prop</th><th>Streak</th></tr>${streaks.slice(0,20).map(x=>tr(x,`<span class="side ${x.sd>0?'o':'u'}">${x.r.m==='anytime_td'?'YES':x.sd>0?'O':'U'} ${x.r.m==='anytime_td'?'':x.r.line}</span> ${x.a.streak} straight`)).join('')||'<tr><td colspan=3 class="mut">None</td></tr>'}</table></div></div>
@@ -620,7 +679,7 @@ function viewFavorites(){
   if(!FAV.length) return `<h1>Watchlist</h1><div class="empty card">No starred props yet. Tap ★ on any prop.</div>`;
   const cards=FAV.map(f=>{const p=S.players[f.pid]; if(!p) return ''; const cur=lineFor(f.pid,f.m); const line=cur?.line??f.line;
     const a=analyze(f.pid,f.m,line,f.side), sc=score(a), st=S.slateTeam[p.team];
-    return `<div class="card"><div class="row">${headshot(p)}<div class="sp"><a class="pname" href="#/player/${f.pid}?m=${f.m}">${esc(p.name)}</a><div class="small mut">${p.pos} · ${p.team}${st?` ${st.home?'vs':'@'} ${st.opp} · ${fmtTime(st.g.ko)}`:' · not on slate'}</div></div><button class="star on" data-fav="${f.pid}|${f.m}|${f.line}|${f.side}">★</button></div>
+    return `<div class="card"><div class="row">${headshot(p)}<div class="sp"><a class="pname" href="#/player/${f.pid}?m=${f.m}">${esc(p.name)}</a>${warnIcon(f.pid)}<div class="small mut">${p.pos} · ${p.team}${st?` ${st.home?'vs':'@'} ${st.opp} · ${fmtTime(st.g.ko)}`:' · not on slate'}</div></div><button class="star on" data-fav="${f.pid}|${f.m}|${f.line}|${f.side}">★</button></div>
       <div class="row" style="margin:8px 0"><span class="side ${f.side>0?'o':'u'}">${f.m==='anytime_td'?'YES':f.side>0?'OVER':'UNDER'}</span><b>${f.m==='anytime_td'?'':line} ${MK[f.m].label}</b>${line!==f.line?`<span class="pill a">saved at ${f.line}</span>`:''}<span class="sp"></span><b>${sc.score}</b></div>
       ${hrChips(a)}<div style="margin-top:8px"><button class="btn" data-slip="${f.pid}|${f.m}|${line}|${f.side}">+ Slip</button></div></div>`;}).join('');
   return `<h1>Watchlist</h1><p class="sub">${FAV.length} starred props (saved in this browser), re-scored against the latest line.</p><div class="grid g3">${cards}</div>`;
@@ -633,7 +692,7 @@ function viewSlip(){
   const items=SLIP.map((s,i)=>{const p=S.players[s.pid]; if(!p) return ''; const a=analyze(s.pid,s.m,s.line,s.side); const b=S.lines[s.pid+'|'+s.m];
     const best = b && b.line===s.line ? (s.side>0?b.bestO:b.bestU) : null; const price = best ? (s.side>0?best.over:best.under) : null;
     if(price!=null) dec*=toDec(price); else priced=false; prob*= (a.L10?.r ?? .5);
-    return `<tr><td><a href="#/player/${s.pid}?m=${s.m}"><b>${esc(p.name)}</b></a><div class="small mut">${p.team} · ${MK[s.m].label}</div></td><td><span class="side ${s.side>0?'o':'u'}">${s.m==='anytime_td'?'YES':s.side>0?'O':'U'} ${s.m==='anytime_td'?'':s.line}</span></td>
+    return `<tr><td><a href="#/player/${s.pid}?m=${s.m}"><b>${esc(p.name)}</b></a>${warnIcon(s.pid)}<div class="small mut">${p.team} · ${MK[s.m].label}</div></td><td><span class="side ${s.side>0?'o':'u'}">${s.m==='anytime_td'?'YES':s.side>0?'O':'U'} ${s.m==='anytime_td'?'':s.line}</span></td>
       <td>${price!=null?fmtOdds(price)+' <span class="mut small">'+esc(best.book)+'</span>':'<span class="mut">–</span>'}</td><td>${pct(a.L10?.r)}</td><td><button class="btn" data-rm="${i}">✕</button></td></tr>`;}).join('');
   const txt = SLIP.map(s=>`${S.players[s.pid]?.name} ${s.m==='anytime_td'?'Anytime TD':(s.side>0?'Over ':'Under ')+s.line+' '+MK[s.m].label}`).join('\n');
   return `<h1>Slip builder</h1><div class="tbl"><table><tr><th>Player</th><th>Pick</th><th>Best price</th><th>L10 hit</th><th></th></tr>${items}</table></div>
@@ -693,7 +752,7 @@ function bindSearch(){
   const run=()=>{ const q=norm(inp.value); if(q.length<2||!S.ready){box.hidden=true;return;}
     const season=S.stats.season;
     const res=Object.values(S.players).filter(p=>norm(p.name).includes(q)).sort((a,b)=>(b.last[0]-a.last[0])||(norm(a.name).indexOf(q)-norm(b.name).indexOf(q))).slice(0,10);
-    box.innerHTML=res.map(p=>`<a href="#/player/${p.id}">${headshot(p)}<div><b>${esc(p.name)}</b><div class="small mut">${p.pos} · ${p.team}${p.last[0]<season?' · '+p.last[0]:''}</div></div></a>`).join('')||'<div class="empty small">No players</div>';
+    box.innerHTML=res.map(p=>`<a href="#/player/${p.id}">${headshot(p)}<div><b>${esc(p.name)}</b>${kiAll(keyInj(p.id)).length?' ⚠️':''}<div class="small mut">${p.pos} · ${p.team}${p.last[0]<season?' · '+p.last[0]:''}</div></div></a>`).join('')||'<div class="empty small">No players</div>';
     box.hidden=false; idx=-1; };
   inp.oninput=run; inp.onfocus=run;
   inp.onkeydown=e=>{const items=$$('a',box); if(e.key==='ArrowDown'){idx=Math.min(idx+1,items.length-1);} else if(e.key==='ArrowUp'){idx=Math.max(idx-1,0);} else if(e.key==='Enter'){ (items[idx]||items[0])?.click(); return;} else if(e.key==='Escape'){box.hidden=true;return;} else return; e.preventDefault(); items.forEach((a,i)=>a.classList.toggle('act',i===idx)); };
@@ -727,4 +786,18 @@ window.addEventListener('hashchange', route);
   bindSearch(); updSlipCount();
   try{ await load(); banner(); route(); }
   catch(e){ console.error(e); $('#app').innerHTML=`<div class="banner err">Couldn't load data (${esc(e.message)}). The first data refresh may not have run yet — try again in a few minutes.</div>`; }
+})();
+/* ⚠️ popover: hover on desktop, tap on mobile (cards clip overflow, so it's a fixed-position layer) */
+(function(){
+  let tip=null, cur=null;
+  const hide=()=>{ if(tip){tip.remove(); tip=null; cur=null;} };
+  const show=el=>{ if(cur===el) return; hide(); const src=el.querySelector('.tip'); if(!src) return;
+    tip=document.createElement('div'); tip.id='kitip'; tip.innerHTML='<b>⚠️ Key injuries</b>'+src.innerHTML; document.body.appendChild(tip); cur=el;
+    const r=el.getBoundingClientRect(), w=tip.offsetWidth, h=tip.offsetHeight;
+    let x=Math.min(Math.max(8,r.left+r.width/2-w/2), innerWidth-w-8), y=r.bottom+6; if(y+h>innerHeight-8) y=Math.max(8,r.top-h-6);
+    tip.style.left=x+'px'; tip.style.top=y+'px'; };
+  document.addEventListener('mouseover',e=>{ const w=e.target.closest?.('.warn'); if(w && matchMedia('(hover:hover)').matches) show(w); else if(!w && cur && matchMedia('(hover:hover)').matches) hide(); });
+  document.addEventListener('click',e=>{ const w=e.target.closest?.('.warn'); if(w){ e.preventDefault(); e.stopPropagation(); cur===w?hide():show(w); } else hide(); }, true);
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape') hide(); if(e.key==='Enter' && document.activeElement?.classList.contains('warn')) show(document.activeElement); });
+  addEventListener('scroll',hide,{passive:true}); addEventListener('hashchange',hide);
 })();

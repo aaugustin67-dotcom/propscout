@@ -136,6 +136,57 @@ def load_injuries():
     note("injuries", "ok", f"{len(out)} entries")
     return out
 
+# ---------------- snap counts (who is a starter / key player) ----------------
+GRP = {"QB":"QB","RB":"RB","HB":"RB","FB":"RB","WR":"WR","TE":"TE",
+       "T":"OL","OT":"OL","G":"OL","OG":"OL","C":"OL","OL":"OL",
+       "DE":"DL","DT":"DL","NT":"DL","DL":"DL","EDGE":"DL",
+       "LB":"LB","OLB":"LB","ILB":"LB","MLB":"LB","CB":"CB","S":"S","FS":"S","SS":"S","DB":"S"}
+KEY_SNAP = {"QB":.5,"RB":.35,"WR":.45,"TE":.45,"OL":.6,"DL":.5,"LB":.5,"CB":.6,"S":.6}
+
+def load_snaps(season):
+    url = f"https://github.com/nflverse/nflverse-data/releases/download/snap_counts/snap_counts_{season}.csv"
+    try:
+        raw, _ = fetch(url, timeout=120)
+        rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8"))))
+    except Exception as e:
+        note("snaps", "error", str(e)); return None
+    if not rows:
+        note("snaps", "error", "empty"); return None
+    team_weeks, ply = {}, {}
+    for r in rows:
+        if r.get("game_type") not in ("REG", "POST"): continue
+        t, wk = r["team"], int(r["week"])
+        team_weeks.setdefault(t, set()).add(wk)
+        pct = max(float(r.get("offense_pct") or 0), float(r.get("defense_pct") or 0))
+        k = (norm(r["player"]), t)
+        q = ply.setdefault(k, {"pos": r["position"], "w": {}})
+        q["w"][wk] = pct
+    note("snaps", "ok", f"{len(rows)} rows, through week {max(max(v) for v in team_weeks.values())}")
+    return {"team_weeks": {t: sorted(v) for t, v in team_weeks.items()}, "players": ply}
+
+def enrich_injuries(inj, snaps):
+    """Tag each injury with position group, season snap share and whether it is a fresh absence."""
+    if not snaps: return inj
+    for i in inj:
+        grp = GRP.get((i.get("pos") or "").upper())
+        i["grp"] = grp
+        q = snaps["players"].get((norm(i.get("name")), i.get("team")))
+        if not q:  # traded mid-season: fall back to a unique name match on any team
+            c = [v for (n, t), v in snaps["players"].items() if n == norm(i.get("name"))]
+            q = c[0] if len(c) == 1 else None
+        if not q or not grp:
+            i["snap"] = None; i["gp"] = 0; i["key"] = False; i["fresh"] = False; continue
+        played = [v for v in q["w"].values() if v > 0]
+        snap = sum(played) / len(played) if played else 0
+        tw = snaps["team_weeks"].get(i["team"], [])
+        last2 = tw[-2:]
+        i["snap"] = round(snap, 2); i["gp"] = len(played)
+        i["key"] = len(played) >= 2 and snap >= KEY_SNAP.get(grp, .6)
+        # fresh = played meaningful snaps in one of the team's last two games, so his absence
+        # is NOT yet reflected in teammates' recent stats
+        i["fresh"] = any(q["w"].get(w, 0) >= .2 for w in last2)
+    return inj
+
 # ---------------- odds ----------------
 def load_odds(upcoming, players_by_norm):
     key = os.environ.get("ODDS_API_KEY", "").strip()
@@ -307,6 +358,7 @@ def main():
     inj = load_injuries()
     if inj is None:
         inj = load_json(os.path.join(OUT, "injuries.json"), {"items": []}).get("items", [])
+    inj = enrich_injuries(inj, load_snaps(cur))
     by_norm = {}
     for pid, p in players.items():
         if p["last"][0] == cur or pid not in by_norm.values():
