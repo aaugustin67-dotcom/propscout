@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f14">
+<title>PropScout · NHL prop research</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230b0f14'/><path d='M14 44 L26 30 L36 38 L50 20' stroke='%2322c55e' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/"><span class="logo">▲</span> PropScout</a>
+  <div class="sport seg"><a href="../">NFL</a><a class="on" href="./">NHL</a></div>
+  <nav class="topnav" id="topnav">
+    <a href="#/" data-r="home">Top Picks</a>
+    <a href="#/board" data-r="board">Board</a>
+    <a href="#/defense" data-r="defense">Defense vs Pos</a>
+    <a href="#/trending" data-r="trending">Trending</a>
+    <a href="#/favorites" data-r="favorites">Watchlist</a>
+    <a href="#/injuries" data-r="injuries">Injuries</a>
+    <a href="#/slip" data-r="slip">Slip <span class="badge" data-slipcount></span></a>
+    <a href="#/categories" data-r="categories">Categories</a>
+    <a href="#/data" data-r="data">Data</a>
+  </nav>
+  <div class="search-wrap">
+    <input id="gsearch" type="search" placeholder="Search player…" autocomplete="off" aria-label="Search player">
+    <div id="gsearch-results" class="search-results" hidden></div>
+  </div>
+</header>
+<div id="banner"></div>
+<main id="app"><div class="loading"><div class="spinner"></div>Loading data…</div></main>
+<nav class="bottomnav">
+  <a href="#/" data-r="home"><span>★</span>Picks</a>
+  <a href="#/board" data-r="board"><span>☰</span>Board</a>
+  <a href="#/defense" data-r="defense"><span>🛡</span>DvP</a>
+  <a href="#/slip" data-r="slip"><span>🧾</span>Slip <i class="badge" data-slipcount></i></a>
+  <a href="#/more" data-r="more"><span>⋯</span>More</a>
+</nav>
+<footer class="foot">PropScout is a personal research tool. Not betting advice. Stats: NHL public API · Injuries: ESPN · Lines: The Odds API (optional).</footer>
+<div id="toast" class="toast" hidden></div>
+<script>window.PS_DATA="../data/nhl/"; window.PS_PREFIX="ps_nhl_";</script>
+<script src="../app.js"></script>
+<script src="nhl.js"></script>
+</body>
+</html>

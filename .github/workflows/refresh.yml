@@ -23,7 +23,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,8 +32,15 @@ jobs:
       - name: Build data
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ODDS_NFL_MARKETS: ${{ vars.ODDS_NFL_MARKETS || '' }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python scripts/build_data.py
+      - name: Build NHL data
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          NHL_MONTHLY_CAP: ${{ vars.NHL_MONTHLY_CAP || '60' }}
+          ODDS_NFL_MARKETS: ${{ vars.ODDS_NFL_MARKETS || '' }}
+        run: python scripts/build_nhl.py
       - name: Commit data
         run: |
           git config user.name "propscout-bot"

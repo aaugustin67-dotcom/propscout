@@ -18,7 +18,7 @@ SEASONS = [int(s) for s in os.environ.get("SEASONS", "").split(",") if s] or Non
 POS = {"QB", "RB", "WR", "TE", "FB"}
 STAT_COLS = ["completions", "attempts", "passing_yards", "passing_tds", "passing_interceptions",
              "carries", "rushing_yards", "rushing_tds", "receptions", "targets",
-             "receiving_yards", "receiving_tds"]
+             "receiving_yards", "receiving_tds", "sacks_suffered"]
 
 TEAM_NAMES = {
  "Arizona Cardinals":"ARI","Atlanta Falcons":"ATL","Baltimore Ravens":"BAL","Buffalo Bills":"BUF",
@@ -36,6 +36,11 @@ MARKETS = {  # Odds API market key -> our key
  "player_rush_yds":"rush_yds","player_reception_yds":"rec_yds","player_receptions":"receptions",
  "player_anytime_td":"anytime_td",
 }
+
+def nfl_markets():
+    """Optional env ODDS_NFL_MARKETS (comma list of Odds API keys) to trim NFL credit use; default all 7."""
+    m = [x.strip() for x in os.environ.get("ODDS_NFL_MARKETS", "").split(",") if x.strip() in MARKETS]
+    return m or list(MARKETS)
 
 log = []
 def note(src, status, msg=""):
@@ -230,7 +235,7 @@ def load_odds(upcoming, players_by_norm):
             note("odds", "budget", f"only {state['remaining']} credits left - skipping")
             break
         url = (f"{base}/events/{ev['id']}/odds?apiKey={key}&regions=us&oddsFormat=american"
-               f"&markets={','.join(MARKETS)}")
+               f"&markets={','.join(nfl_markets())}")
         try:
             raw, hdr = fetch(url)
         except urllib.error.HTTPError as e:
@@ -284,10 +289,10 @@ def load_odds(upcoming, players_by_norm):
 
 # ---------------- betting splits (DraftKings Network public page, game lines only) ----------------
 DK_ABBR = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "LVR": "LV"}
-def load_splits():
+def load_splits(eg="88808", out="splits.json", names=None, label="NFL"):
     """% handle and % bets for moneyline / spread / total from DraftKings' free public splits page.
     Allowed by robots.txt; one or two page loads per run. Player-prop splits are not published there."""
-    base = "https://dknetwork.draftkings.com/draftkings-sportsbook-betting-splits/?tb_eg=88808&tb_edate=n7days&tb_emt=0"
+    base = f"https://dknetwork.draftkings.com/draftkings-sportsbook-betting-splits/?tb_eg={eg}&tb_edate=n7days&tb_emt=0"
     games, seen = [], set()
     strip = lambda x: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", x)).replace("\u2212", "-").strip()
     for page in range(1, 5):
@@ -302,7 +307,7 @@ def load_splits():
             t = re.search(r"<h5[^>]*>(.*?)</h5>", b, re.S)
             parts = strip(t.group(1)).split(" @ ") if t else []
             if len(parts) != 2: continue
-            nick = {v.split()[-1]: k for v, k in ((n, a) for n, a in TEAM_NAMES.items())}
+            nick = {n.split()[-1]: a for n, a in (names or TEAM_NAMES).items()}
             away, home = (nick.get(x.split()[-1]) for x in parts)
             if not away or not home: continue
             if (away, home) in seen: continue
@@ -325,8 +330,8 @@ def load_splits():
         if not new or f"tb_page={page + 1}" not in h: break
         time.sleep(1)
     if games:
-        note("splits", "ok", f"{len(games)} NFL games (DraftKings handle/bets %)")
-        save("splits.json", {"updated": NOW.isoformat(), "source": "DraftKings Sportsbook public betting splits (dknetwork.draftkings.com)", "games": games})
+        note("splits", "ok", f"{len(games)} {label} games (DraftKings handle/bets %)")
+        save(out, {"updated": NOW.isoformat(), "source": "DraftKings Sportsbook public betting splits (dknetwork.draftkings.com)", "games": games})
     else:
         note("splits", "skipped", "no splits parsed - keeping previous")
 
@@ -425,6 +430,27 @@ def main():
             by_norm.setdefault(norm(p["name"]), pid)
     prev_count = len(load_json(os.path.join(OUT, "props.json"), {"lines": []}).get("lines", []))
     props, ostate = load_odds(upcoming, by_norm)
+    # grade stored real lines once games are final -> category base rates
+    try:
+        import grading
+        COLIDX = {c: i + 6 for i, c in enumerate(STAT_COLS)}
+        MV = {"pass_yds": ["passing_yards"], "pass_tds": ["passing_tds"], "completions": ["completions"],
+              "rush_yds": ["rushing_yards"], "rec_yds": ["receiving_yards"], "receptions": ["receptions"],
+              "anytime_td": ["rushing_tds", "receiving_tds"]}
+        def value_of(e):
+            ct = datetime.fromisoformat(e["commence"].replace("Z", "+00:00"))
+            for r in logs.get(e["pid"], []):
+                g = games.get(r[2])
+                if g and g["ko"] and abs((datetime.fromisoformat(g["ko"]) - ct).total_seconds()) < 8 * 3600:
+                    v = sum(r[COLIDX[c]] for c in MV[e["market"]])
+                    return (1 if v >= 1 else 0) if e["market"] == "anytime_td" else v
+            return None
+        added = grading.archive_lines("nfl", props.get("lines", []), os.path.join(OUT, "line_archive.json"))
+        done, pend = grading.grade(os.path.join(OUT, "line_archive.json"), os.path.join(OUT, "results.json"),
+                                   value_of, now=NOW, yes_only=("anytime_td",))
+        note("grading", "ok", f"archived {added} new lines; graded {done}; {pend} waiting for final stats")
+    except Exception as e:
+        note("grading", "error", str(e))
     load_splits()
     alert_new_lines(props, prev_count, players)
 

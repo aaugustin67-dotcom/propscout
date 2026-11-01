@@ -29,11 +29,11 @@ const dvpPos = (m, pos) => MK[m].dvp || (pos === 'FB' ? 'RB' : pos);
 const BAD_STATUS = /^(out|doubtful|injured reserve|ir|suspension|pup)/i;
 
 /* ---------- state ---------- */
-const S = {stats:null, games:null, inj:null, props:null, hist:null, status:null, odds:null,
+const S = {SPORT:'nfl', POS_LIST:['QB','RB','WR','TE'], SKILL:['QB','RB','WR','TE','FB'], stats:null, games:null, inj:null, props:null, hist:null, status:null, odds:null,
   players:{}, logs:{}, gamesById:{}, injByName:{}, injByTeam:{}, slate:[], slateTeam:{}, dvp:{}, lines:{}, board:[], ready:false};
 const LS = {
-  get(k, d){ try{ return JSON.parse(localStorage.getItem('ps_'+k)) ?? d; }catch{ return d; } },
-  set(k, v){ localStorage.setItem('ps_'+k, JSON.stringify(v)); }
+  get(k, d){ try{ return JSON.parse(localStorage.getItem((window.PS_PREFIX||'ps_')+k)) ?? d; }catch{ return d; } },
+  set(k, v){ localStorage.setItem((window.PS_PREFIX||'ps_')+k, JSON.stringify(v)); }
 };
 let FAV = LS.get('fav', []);   // [{pid,m,line,side}]
 let SLIP = LS.get('slip', []); // [{pid,m,line,side}]
@@ -57,7 +57,7 @@ const roundHalf = x => Math.floor(x)+0.5;
 
 /* ---------- load ---------- */
 async function getJSON(f, fallback){
-  try{ const r = await fetch('data/'+f+'?v='+Math.floor(Date.now()/600000)); if(!r.ok) throw new Error(r.status); return await r.json(); }
+  try{ const r = await fetch((window.PS_DATA||'data/')+f+'?v='+Math.floor(Date.now()/600000)); if(!r.ok) throw new Error(r.status); return await r.json(); }
   catch(e){ console.warn('load fail', f, e); if(fallback!==undefined) return fallback; throw e; }
 }
 async function load(){
@@ -65,7 +65,7 @@ async function load(){
     getJSON('stats.json'), getJSON('games.json'), getJSON('injuries.json',{items:[]}),
     getJSON('props.json',{lines:[]}), getJSON('line_history.json',{}), getJSON('status.json',{})]);
   Object.assign(S,{stats,games,inj,props,hist,status});
-  S.snaps = await getJSON('snaps.json',{});
+  S.snaps = await getJSON('snaps.json',{}); S.cats = await getJSON('results.json',{cats:{}});
   S.splits = await getJSON('splits.json',{games:[]}); S.splitBy={}; for(const g of S.splits.games||[]) S.splitBy[g.away+'@'+g.home] ??= g;
   const cols = stats.cols;
   S.players = stats.players;
@@ -85,7 +85,7 @@ function injuryOf(p){ const i=S.injByName[norm(p.name)+'|'+p.team]; return i && 
    Own team: who competes with / feeds him.  Opponent: who covers him.
    Only Out / Doubtful / Questionable / IR, and only "key" players (season snap share
    above a starter threshold, from nflverse snap counts). */
-const KI_STATUS = /^(out|doubtful|questionable|injured reserve)/i;
+const KI_STATUS = /^(out|doubtful|questionable|injured reserve|day-to-day)/i;
 const KI_OWN = {QB:['WR','TE','OL'], RB:['RB','OL'], WR:['WR','TE','QB'], TE:['TE','WR','QB']};
 const KI_OPP = {QB:['DL','CB','S'], RB:['DL','LB'], WR:['CB','S'], TE:['LB','S']};
 /* score points for the OVER side per fresh Out/Doubtful/IR key player (Questionable = 40%).
@@ -96,9 +96,10 @@ const KI_PTS = {
 };
 const KI_CAP = 12, KI_SELF_Q = -6;  // his own Questionable tag: -6 on either side (risk he sits or is limited)
 const KI_LAB = {own:'teammate', opp:'defender'};
-const kiW = st => /^questionable/i.test(st||'') ? .4 : 1;
-const kiShort = st => /^injured/i.test(st)?'IR':/^out/i.test(st)?'Out':/^doubt/i.test(st)?'D':/^quest/i.test(st)?'Q':st;
-const kiCls = st => /^questionable/i.test(st||'')?'a':'r';
+const kiW = st => /^(questionable|day-to-day)/i.test(st||'') ? .4 : 1;
+const kiShort = st => /^injured/i.test(st)?'IR':/^out/i.test(st)?'Out':/^doubt/i.test(st)?'D':/^quest/i.test(st)?'Q':/^day/i.test(st)?'DTD':st;
+const kiUse = i => i.role ? `${i.role}${i.toi?`, ${i.toi} TOI`:''}` : `${Math.round((i.snap||0)*100)}% snaps`;
+const kiCls = st => /^(questionable|day-to-day)/i.test(st||'')?'a':'r';
 const _ki = {};
 function keyInj(pid){
   if(_ki[pid]) return _ki[pid];
@@ -113,8 +114,8 @@ function keyInj(pid){
   if(st) res.opp = pick(st.opp, KI_OPP[pos], 'opp');
   let t=0; for(const i of [...res.own,...res.opp]) t+=i.pts;
   res.pts = Math.max(-KI_CAP, Math.min(KI_CAP, r1(t)));
-  const me=injuryOf(p); res.self = me && /^questionable/i.test(me.status||'') ? KI_SELF_Q : 0; res.selfSt = me?.status;
-  for(const i of [...res.own,...res.opp]) if(i.pts) res.notes.push({t:`${i.side==='own'?p.team:st.opp} ${i.grp} ${i.name} ${kiShort(i.status)} (${Math.round((i.snap||0)*100)}% snaps)`, v:i.pts});
+  const me=injuryOf(p); res.self = me && /^(questionable|day-to-day)/i.test(me.status||'') ? KI_SELF_Q : 0; res.selfSt = me?.status;
+  for(const i of [...res.own,...res.opp]) if(i.pts) res.notes.push({t:`${i.side==='own'?p.team:st.opp} ${i.grp} ${i.name} ${kiShort(i.status)} (${kiUse(i)})`, v:i.pts});
   return (_ki[pid]=res);
 }
 const kiAll = k => [...k.own, ...k.opp];
@@ -132,7 +133,7 @@ function kiCompact(pid){
 function kiPanel(pid){
   const k=keyInj(pid), p=S.players[pid], opp=S.slateTeam[p.team]?.opp, pos=p.pos==='FB'?'RB':p.pos;
   if(!KI_OWN[pos]) return '';
-  const list=(arr,side)=>arr.length?arr.map(i=>`<div class="row small" style="padding:3px 0"><span class="pill ${kiCls(i.status)}">${esc(i.status)}</span><b>${esc(i.name)}</b><span class="mut">${esc(i.pos||i.grp)} · ${Math.round((i.snap||0)*100)}% snaps${i.fresh?'':' · long-term (already in recent stats)'}</span><span class="sp"></span>${i.pts?`<span class="pill ${i.pts*(side==='opp'?1:1)>0?'g':'r'}">${i.pts>0?'+':''}${r1(i.pts)}</span>`:''}</div>`).join(''):'<div class="mut small">None</div>';
+  const list=(arr,side)=>arr.length?arr.map(i=>`<div class="row small" style="padding:3px 0"><span class="pill ${kiCls(i.status)}">${esc(i.status)}</span><b>${esc(i.name)}</b><span class="mut">${esc(i.pos||i.grp)} · ${esc(kiUse(i))}${i.fresh?'':' · long-term (already in recent stats)'}</span><span class="sp"></span>${i.pts?`<span class="pill ${i.pts*(side==='opp'?1:1)>0?'g':'r'}">${i.pts>0?'+':''}${r1(i.pts)}</span>`:''}</div>`).join(''):'<div class="mut small">None</div>';
   return `<h2>Key injuries</h2><div class="grid g2">
    <div class="card"><div class="small mut" style="margin-bottom:4px">${p.team} at ${KI_OWN[pos].join('/')} (usage & volume)</div>${list(k.own,'own')}</div>
    <div class="card"><div class="small mut" style="margin-bottom:4px">${opp?opp+' defense':'Opponent'} at ${KI_OPP[pos].join('/')} (who covers him)</div>${opp?list(k.opp,'opp'):'<div class="mut small">No game this week</div>'}</div></div>
@@ -156,7 +157,7 @@ function buildDvP(){
   const dGames = {};
   for(const g of S.games.games) if(g.season===season && g.hs!=null){ (dGames[g.home]??=new Set()).add(g.id); (dGames[g.away]??=new Set()).add(g.id); }
   const out = {};
-  for(const pos of ['QB','RB','WR','TE']){
+  for(const pos of S.POS_LIST){
     out[pos] = {};
     for(const m of Object.keys(MK)){
       const rows = Object.keys(dGames).map(t => { const a=agg[t]?.[pos]; const n=dGames[t].size||1; return {t, v:a?(a.s[m]||0)/n:0, n}; });
@@ -165,7 +166,7 @@ function buildDvP(){
     }
   }
   const outO = {};
-  for(const pos of ['QB','RB','WR','TE']){
+  for(const pos of S.POS_LIST){
     outO[pos] = {};
     for(const m of Object.keys(MK)){
       const rows = Object.keys(dGames).map(t => { const a=off[t]?.[pos]; const n=dGames[t].size||1; return {t, v:a?(a.s[m]||0)/n:0, n}; });
@@ -240,10 +241,109 @@ function analyze(pid, m, line, side=1, opts={}){
   res.dvp = opp ? dvpOf(opp, m, p.pos) : null;
   return res;
 }
+/* ---------- matchup factor ----------
+   Composite 0-1 (for the Over; 1-x for the Under), from:
+     35% defense vs position, season (stat-specific: e.g. rec yds allowed to WRs)
+     20% same, recent form (defense's last 4 games NFL / last 10 NHL)
+     20% game environment: implied team total from total + moneyline/spread, plus game script
+         (NFL: underdogs pass more, favorites run more; NHL: more defending -> more blocks/hits)
+     10% pace (NFL plays per game, NHL shot volume) for both teams
+     15% sport-specific: NFL QB - opponent sacks/game; NHL - opposing goalie save% (goals/points), shots allowed (goalies)
+   NHL rest: own back-to-back -0.08, opponent back-to-back +0.06.  Grade: A >=.68, B >=.57, C >=.43, D >=.32, else F. */
+const PASSM = new Set(['pass_yds','pass_tds','completions','pass_att','ints','rec_yds','receptions','targets']);
+const RUSHM = new Set(['rush_yds','rush_att']);
+const LEAGUE_TT = {nfl:22.5, nhl:3.1};
+const clamp01 = x => Math.max(0, Math.min(1, x));
+function gameEnv(team){
+  const st=S.slateTeam[team]; if(!st) return null; const g=st.g; let total=null, pw=null, src='';
+  const sp=splitOf(g);
+  if(sp?.markets?.total?.[0]) { const t=parseFloat(String(sp.markets.total[0].side).replace(/[^0-9.]/g,'')); if(t) { total=t; src='DraftKings'; } }
+  if(sp?.markets?.moneyline?.length===2){ let [h,a]=sp.markets.moneyline; if(String(a.side).toUpperCase().startsWith(g.home)) [h,a]=[a,h];
+    const nv=noVig(h.odds,a.odds); if(nv) pw = st.home ? nv.o : nv.u; }
+  let tt=null;
+  if(total==null && g.total){ total=g.total; src='nflverse'; }
+  if(total==null) return null;
+  if(S.SPORT==='nfl' && g.spread!=null){ const m = st.home ? g.spread : -g.spread; tt = total/2 + m/2; if(pw==null) pw = 1/(1+Math.exp(-m/6)); }
+  if(pw==null) pw=.5;
+  if(tt==null) tt = total*(.5 + (pw-.5)*.55);
+  return {total, pw, tt:r1(tt), oppT:r1(total-tt), src};
+}
+function buildMatchupExtras(){
+  // recent DvP: each defense's last K games
+  const season=S.stats.season, K = S.SPORT==='nhl'?10:4;
+  const last={}; for(const g of [...S.games.games].filter(g=>g.season===season && g.hs!=null).sort((a,b)=>a.ko<b.ko?1:-1)){
+    for(const t of [g.home,g.away]){ const a=(last[t] ??= new Set()); if(a.size<K) a.add(g.id); } }
+  const agg={}, plays={}, allowed={};
+  for(const [pid, rows] of Object.entries(S.logs)){
+    const p=S.players[pid]; if(!p) continue; const pos=p.pos==='FB'?'RB':p.pos;
+    for(const g of rows){ if(g.season!==season) continue;
+      const pl = S.SPORT==='nhl' ? (pos==='G'?0:(g.sog||0)) : ((g.attempts||0)+(g.carries||0));
+      ((plays[g.team] ??= {})[g.game] = (plays[g.team][g.game]||0)+pl);
+      ((allowed[g.opp] ??= {})[g.game] = (allowed[g.opp][g.game]||0)+pl);
+      if(S.SPORT==='nfl' && pos==='QB'){ ((S._sacks ??= {})[g.opp] ??= {s:0,gm:new Set()}); S._sacks[g.opp].s+=g.sacks_suffered||0; S._sacks[g.opp].gm.add(g.game); }
+      if(!last[g.opp]?.has(g.game)) continue;
+      const a=((agg[g.opp] ??= {})[pos] ??= {s:{}});
+      for(const m of Object.keys(MK)){ a.s[m]=(a.s[m]||0)+MK[m].f(g); }
+    }
+  }
+  S.dvpR={};
+  for(const pos of S.POS_LIST){ S.dvpR[pos]={};
+    for(const m of Object.keys(MK)){ const rows=Object.keys(last).map(t=>({t, v:(agg[t]?.[pos]?.s[m]||0)/(last[t].size||1)})); rows.sort((x,y)=>x.v-y.v);
+      rows.forEach((r,i)=>{ (S.dvpR[pos][r.t] ??= {})[m]={v:r1(r.v), rank:i+1}; }); } }
+  const avgOf=o=>{ const v=Object.values(o||{}); return v.length? v.reduce((a,b)=>a+b,0)/v.length : null; };
+  S.pace={}; for(const t of Object.keys(plays)) S.pace[t]={off:avgOf(plays[t]), def:avgOf(allowed[t])};
+  const vals=Object.values(S.pace).flatMap(x=>[x.off,x.def]).filter(x=>x!=null); S.paceMu=avg(vals); S.paceSd=Math.sqrt(avg(vals.map(v=>(v-S.paceMu)**2)))||1;
+  if(S._sacks){ S.sackPg={}; for(const [t,x] of Object.entries(S._sacks)) S.sackPg[t]=x.s/(x.gm.size||1); const sv=Object.values(S.sackPg); S.sackMu=avg(sv); S.sackSd=Math.sqrt(avg(sv.map(v=>(v-S.sackMu)**2)))||1; }
+}
+const _mu={};
+function matchup(a){
+  const k=a.pid+'|'+a.m+'|'+a.side+'|'+a.opp; if(_mu[k]) return _mu[k];
+  const p=S.players[a.pid]; if(!S.pace) buildMatchupExtras();
+  const pos=dvpPos(a.m,p.pos), comps=[];
+  const add=(label, part, w, txt)=>{ if(part==null||isNaN(part)) return; comps.push({label, part:clamp01(part), w, txt}); };
+  if(a.dvp) add('Defense vs '+pos+' (season)', (a.dvp.rank-1)/31, .35, `${a.opp} allows ${a.dvp.v} ${MK[a.m].label.toLowerCase()}/g, rank ${a.dvp.rank}/32`);
+  const dr = a.opp ? S.dvpR?.[pos]?.[a.opp]?.[a.m] : null;
+  if(dr) add('Defense vs '+pos+' (recent)', (dr.rank-1)/31, .20, `last ${S.SPORT==='nhl'?10:4}: ${dr.v}/g, rank ${dr.rank}/32`);
+  const env=gameEnv(p.team), avgT=LEAGUE_TT[S.SPORT];
+  if(env){ let part, txt;
+    if(S.SPORT==='nhl' && (a.m==='blk'||a.m==='hits'||p.pos==='G')){ part=.5+(env.oppT-avgT)/(avgT*1.0); txt=`opponent implied ${env.oppT} goals (total ${env.total})`; }
+    else { part=.5+(env.tt-avgT)/(avgT*(S.SPORT==='nhl'?1.0:.62)); txt=`implied team total ${env.tt} (game total ${env.total}${env.pw!=null?`, win prob ${pct(env.pw)}`:''})`;
+      if(S.SPORT==='nfl'){ if(PASSM.has(a.m)){ part+=(.5-env.pw)*.5; if(env.pw<.42) txt+=' · underdog script: more passing'; }
+        if(RUSHM.has(a.m)){ part+=(env.pw-.5)*.6; if(env.pw>.58) txt+=' · favorite script: more running'; } } }
+    add('Game environment', part, .20, txt+(env.src?` [${env.src}]`:'')); }
+  const st=S.slateTeam[p.team];
+  if(st && S.pace[p.team] && S.pace[a.opp]){ let v, txt;
+    if(p.pos==='G'){ v=(S.pace[a.opp].off + S.pace[p.team].def)/2; txt=`${a.opp} shots for + ${p.team} shots allowed ≈ ${r1(v)}/g`; }
+    else { v=(S.pace[p.team].off + S.pace[a.opp].def)/2; txt = S.SPORT==='nhl' ? `${p.team} shots + ${a.opp} shots allowed ≈ ${r1(v)}/g` : `${p.team} plays + ${a.opp} plays allowed ≈ ${r1(v)}/g`; }
+    add('Pace / volume', .5+(v-S.paceMu)/(4*S.paceSd), .10, txt); }
+  if(S.SPORT==='nfl' && p.pos==='QB' && S.sackPg?.[a.opp]!=null && PASSM.has(a.m)) add('Pass rush', .5-(S.sackPg[a.opp]-S.sackMu)/(4*S.sackSd), .15, `${a.opp} ${r1(S.sackPg[a.opp])} sacks/g`);
+  const sp = S.matchSpecial ? S.matchSpecial(a,p) : null; if(sp) add(sp.label, sp.part, .15, sp.txt);
+  let tw=0, t=0; for(const c of comps){ tw+=c.w; t+=c.w*c.part; }
+  let part = tw ? t/tw : .5, adjTxt=[];
+  const rest = S.matchRest ? S.matchRest(a,p) : null; if(rest){ part+=rest.adj; adjTxt.push(rest.txt); }
+  part=clamp01(part); if(a.side<0) part=1-part;
+  const grade = part>=.68?'A':part>=.57?'B':part>=.43?'C':part>=.32?'D':'F';
+  return (_mu[k]={part, grade, pts:r1(W.MATCH*(part-.5)*100), comps, rest:adjTxt});
+}
+
 /* Transparent score (0-100):
    25% L10 hit rate + 20% L5 + 15% season + 10% H2H (season if <2 H2H games)
    + 15% cushion (avg of last 10 vs line, scaled) + 15% matchup (opponent's rank allowing this stat to this position). */
-const W = {L10:.25, L5:.20, SZN:.15, H2H:.10, EDGE:.15, MATCH:.15};
+const W = {L10:.20, L5:.16, SZN:.12, H2H:.07, EDGE:.13, MATCH:.22, CAT:.10};
+/* Category base rate (market x side): published prior blended with our own graded results.
+   rate = (prior*N0 + hits) / (N0 + hits + misses); factor = 0.5 + (rate-0.5)*5, so a 54% category is worth ~+2 pts. */
+const CAT_N0 = 200;
+const CAT_PRIOR = { // under-hit share
+  nfl:{pass_yds:{u:.494,src:'PropSims, FanDuel 2025 (n=530)'}, completions:{u:.538,src:'PropSims, FanDuel 2025 (n=301)'}, pass_tds:{u:.517,src:'PropSims, FanDuel 2025 (n=528)'},
+       rush_yds:{u:.523,src:'PropSims, FanDuel 2025 (n=1,369)'}, rec_yds:{u:.534,src:'PropSims, FanDuel 2025 (n=2,747)'}, receptions:{u:.552,src:'PropSims, FanDuel 2025 (n=2,729)'}},
+  nhl:{sog:{u:.528,src:'Fourth & Value, 2026-27 to date (n=3,526)'}},
+};
+function catRate(m, side){
+  const pr=CAT_PRIOR[S.SPORT]?.[m]; if(!pr) return null; // yes/no & 0.5-line markets: the price carries it, no factor
+  const c=S.cats?.cats?.[m]?.[side>0?'over':'under']||[0,0,0]; const h=c[0], mi=c[1];
+  const p0 = side>0 ? 1-pr.u : pr.u;
+  return {rate:(p0*CAT_N0+h)/(CAT_N0+h+mi), prior:p0, h, n:h+mi, src:pr.src};
+}
 function score(a){
   const hr = k => a[k]?.r ?? null;
   const szn = hr('SZN') ?? hr('L10') ?? .5;
@@ -251,11 +351,12 @@ function score(a){
   const scale = Math.max(Math.abs(a.line)*0.3, MK[a.m].fixed ? 0.6 : 1.5);
   const edgeRaw = a.m==='anytime_td' ? ((a.L10?.r ?? .5) - .5) : a.side*((a.avgL10 ?? a.line) - a.line)/scale;
   const edge = Math.max(0, Math.min(1, .5 + edgeRaw/2));
-  const match = a.dvp ? (a.side>0 ? (a.dvp.rank-1)/31 : (32-a.dvp.rank)/31) : .5;
-  const parts = {L10:hr('L10')??.5, L5:hr('L5')??.5, SZN:szn, H2H:h2h, EDGE:edge, MATCH:match};
+  const mu = a.pid ? matchup(a) : null, match = mu ? mu.part : .5;
+  const cr = catRate(a.m, a.side), cat = cr ? Math.max(0, Math.min(1, .5 + (cr.rate-.5)*5)) : .5;
+  const parts = {L10:hr('L10')??.5, L5:hr('L5')??.5, SZN:szn, H2H:h2h, EDGE:edge, MATCH:match, CAT:cat};
   let t=0; for(const k in W) t+=W[k]*parts[k];
   const ki = a.pid ? keyInj(a.pid) : null, adj = ki ? r1(ki.pts * (a.side>0?1:-1) + ki.self) : 0;
-  return {score:Math.max(0,Math.min(100,Math.round(t*100+adj))), base:Math.round(t*100), parts, inj:adj};
+  return {score:Math.max(0,Math.min(100,Math.round(t*100+adj))), base:Math.round(t*100), parts, inj:adj, mu};
 }
 function reasons(a, p){
   const M = MK[a.m], side = a.side>0?'Over':'Under', out=[];
@@ -263,11 +364,11 @@ function reasons(a, p){
   if(a.m==='anytime_td') out.push(`Scored in ${f(a.L10)} of last ${a.L10?.n||0} games, ${f(a.SZN)} this season`);
   else out.push(`${side} ${a.line} hit in ${f(a.L10)} of last ${a.L10?.n||0}; last 5: ${f(a.L5)}; season: ${f(a.SZN)}`);
   if(a.avgL10!=null && a.m!=='anytime_td'){ const d=a.avgL10-a.line; out.push(`Averaging ${r1(a.avgL10)} over last 10 (${d>=0?'+':''}${r1(d)} vs line), ${a.avgSzn!=null?r1(a.avgSzn)+' this season':''}`); }
-  if(a.dvp){ const pos=dvpPos(a.m,p.pos); const soft=a.dvp.rank>=22, tough=a.dvp.rank<=10;
-    out.push(`${a.opp} allows ${a.dvp.v} ${M.label.toLowerCase()}/game to ${pos}s — ${ordinal(33-a.dvp.rank)} most (${soft?'soft':tough?'tough':'average'} matchup)`); }
-  if(a.H2H && a.H2H.n) out.push(`vs ${a.opp} since 2024: ${f(a.H2H)}`);
+  if(a.pid){ const mu=matchup(a); if(mu.comps.length) out.push(`🛡 Matchup ${mu.grade} (${mu.pts>=0?'+':''}${mu.pts} pts): ${mu.comps.map(c=>c.txt).concat(mu.rest).join('; ')}`); }
+  if(a.H2H && a.H2H.n) out.push(`vs ${a.opp} since ${S.stats.season-(S.SPORT==='nhl'?1:2)}: ${f(a.H2H)}`);
   if(a.VENUE && a.VENUE.n>=3) out.push(`${a.isHome?'Home':'Away'} games (2 seasons): ${f(a.VENUE)}`);
   { const k=keyInj(a.pid); if(k.self) out.push(`🩹 He is listed ${k.selfSt}: ${k.self} pts`); if(k.pts){ const adj=k.pts*(a.side>0?1:-1); const sg=a.side>0?1:-1; out.push(`🩹 Injuries ${adj>0?'+':''}${r1(adj)} pts: ${k.notes.map(n=>`${n.t} ${n.v*sg>0?'+':''}${r1(n.v*sg)}`).join('; ')}`); } }
+  { const cr=catRate(a.m,a.side); if(cr) out.push(`📊 ${MK[a.m].label} ${a.side>0?'Overs':'Unders'} hit ${pct(cr.rate)} as a category (prior ${pct(cr.prior)}, ${cr.src}; our graded lines n=${cr.n})`); }
   if(a.streak>=3) out.push(a.m==='anytime_td'?`🔥 Scored in ${a.streak} straight games`:`🔥 ${a.streak}-game ${side.toLowerCase()} streak`);
   return out;
 }
@@ -353,9 +454,10 @@ function hrChips(a, keys=['L3','L5','L10','SZN','H2H','VENUE']){
   return `<div class="chips">${keys.map(k=>{const x=a[k]; return `<span class="chip ${cls(x?.r)}" title="${x?x.h+'/'+x.n:'no games'}">${lab[k]}<b>${x?pct(x.r):'–'}</b></span>`;}).join('')}</div>`;
 }
 function dvpPill(a,p){
-  if(!a.dvp) return '';
+  const mu=a.pid?matchup(a):null; const gp = mu&&mu.comps.length ? `<span class="pill ${'AB'.includes(mu.grade)?'g':mu.grade==='C'?'a':'r'}" title="Matchup grade (${mu.pts>=0?'+':''}${mu.pts} pts)">Matchup ${mu.grade}</span> ` : '';
+  if(!a.dvp) return gp;
   const r=a.dvp.rank, t=a.side>0?r:33-r, c=t>=22?'g':t<=10?'r':'a';
-  return `<span class="pill ${c}" title="Rank 32 = allows the most">${a.opp} ${ordinal(r)}/32 vs ${dvpPos(a.m,p.pos)}</span>`;
+  return gp+`<span class="pill ${c}" title="Rank 32 = allows the most">${a.opp} ${ordinal(r)}/32 vs ${dvpPos(a.m,p.pos)}</span>`;
 }
 function injPill(inj){ if(!inj || /^active/i.test(inj.status||'')) return ''; const c=BAD_STATUS.test(inj.status)?'r':'a'; return `<span class="pill ${c}" title="${esc(inj.detail)}">${esc(inj.status)}</span>`; }
 function priceStr(row, side){
@@ -400,7 +502,7 @@ function viewHome(){
     if(row.inj && BAD_STATUS.test(row.inj.status)) continue;    // out/doubtful
     if(!row.recent) continue;
     for(const sd of (row.m==='anytime_td'?[1]:[1,-1])){
-      const a = sd>0?row.over.a:row.under.a; if(!a) continue;
+      const a = sd>0?row.over?.a:row.under?.a; if(!a) continue;
       if((a.SZN?.n||0)<3) continue;
       const sc=score(a); pool.push({row, side:sd, a, sc:sc.score});
     }
@@ -412,11 +514,11 @@ function viewHome(){
   if(S.hasBook) filt.sort((x,y)=>(y.row.src==='book')-(x.row.src==='book') || y.sc-x.sc);
   const per={}, perM={}, top=[]; for(const x of filt){ if((per[x.row.pid]||0)>=2) continue; if(f==='all'&&x.row.m==='anytime_td'&&(perM.atd||0)>=4) continue;
     per[x.row.pid]=(per[x.row.pid]||0)+1; if(x.row.m==='anytime_td') perM.atd=(perM.atd||0)+1; top.push(x); if(top.length>=HS.n) break; }
-  const slateTxt = S.slate.length ? `Week ${S.slate[0].week} · ${S.slate.length} games · next kickoff ${fmtTime(S.slate.find(g=>new Date(g.ko)>now)?.ko)}` : 'No upcoming games found';
+  const slateTxt = S.slate.length ? `${S.slateLabel?S.slateLabel():'Week '+S.slate[0].week} · ${S.slate.length} games · next ${S.SPORT==='nhl'?'puck drop':'kickoff'} ${fmtTime(S.slate.find(g=>new Date(g.ko)>now)?.ko)}` : 'No upcoming games found';
   return `<h1>Today's Top Picks</h1>
   <p class="sub">${slateTxt}. Ranked by the PropScout score — every input is shown so you can judge it yourself.</p>
   <details class="card small" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700">How the score works</summary>
-   <p class="mut">Score (0–100) = 25% last-10 hit rate + 20% last-5 + 15% season + 10% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 15% cushion (last-10 average vs the line) + 15% matchup (how much this defense allows to the position, ranked 1–32 from this season's games). Then a <b>key-injury adjustment</b> (capped ±12): +4 per starting WR teammate out (WR/TE), +6 when the other lead RB is out, −6 when his QB is out, −2 per starting OL out (RB/QB), +4 when the opponent's starting CB is out (WR), +2.5 for a starting LB/S out (TE); teammates/defenders listed Questionable count 40% and only fresh absences count; −6 if he himself is Questionable. It's listed in each pick's reasons, and ⚠️ next to a name shows the key injuries around him. Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
+   <p class="mut">Score (0–100) = 20% last-10 hit rate + 16% last-5 + 12% season + 7% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 13% cushion (last-10 average vs the line) + 22% matchup (graded A–F: defense vs position season 35% and recent 20%, game environment from implied team total & game script 20%, pace 10%, pass rush / opposing goalie 15%, NHL rest) + 10% category base rate (how often this market's Overs or Unders hit: a published prior blended with our own graded lines, see <a href="#/categories" style="color:var(--green)">Category hit rates</a>). Then a <b>key-injury adjustment</b> (capped ±12): +4 per starting WR teammate out (WR/TE), +6 when the other lead RB is out, −6 when his QB is out, −2 per starting OL out (RB/QB), +4 when the opponent's starting CB is out (WR), +2.5 for a starting LB/S out (TE); teammates/defenders listed Questionable count 40% and only fresh absences count; −6 if he himself is Questionable. It's listed in each pick's reasons, and ⚠️ next to a name shows the key injuries around him. Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
   ${slateStrip()}
   ${(S.splits.games||[]).length?`<details class="card small" style="margin-bottom:12px"><summary style="cursor:pointer;font-weight:700">📊 Betting splits (% bets / % money) for this week's games</summary><div class="grid g2" style="margin-top:10px">${S.slate.map(g=>splitsCard(g,true)).join('')}</div></details>`:''}
   <div class="tabs" id="htabs">${[['all','All'],['over','Overs'],['under','Unders'],...BOARD_MK.map(m=>[m,MK[m].label])].map(([k,l])=>`<button data-h="${k}" class="${HS.f===k?'on':''}">${l}</button>`).join('')}</div>
@@ -452,7 +554,7 @@ function viewBoard(params){
   <div class="filters">
     <input id="bq" type="search" placeholder="Filter player" value="${esc(BS.q)}" style="width:150px">
     ${sel('bm',[['all','All markets'],...BOARD_MK.map(m=>[m,MK[m].label])],BS.m)}
-    ${sel('bpos',[['all','All pos'],['QB','QB'],['RB','RB'],['WR','WR'],['TE','TE']],BS.pos)}
+    ${sel('bpos',[['all','All pos'],...S.POS_LIST.map(x=>[x,x])],BS.pos)}
     ${sel('bgame',[['all','All games'],...S.slate.map(g=>[g.id,`${g.away} @ ${g.home}`])],BS.game)}
     ${sel('bteam',[['all','All teams'],...teams.map(t=>[t,t])],BS.team)}
     ${sel('bside',[['best','Best side'],['over','Over'],['under','Under']],BS.side)}
@@ -547,7 +649,8 @@ function renderPlayer(){
    </div>
    <details class="card small" style="margin:10px 0" open><summary style="cursor:pointer;font-weight:700">Score breakdown: ${sc.base} base ${sc.inj>=0?'+':''}${sc.inj} injuries = ${sc.score}</summary>
     <table style="margin-top:6px"><tr><th>Factor</th><th>Value</th><th>Weight</th><th>Points</th></tr>
-    ${[['L10 hit rate','L10'],['L5 hit rate','L5'],['Season hit rate','SZN'],['vs opponent','H2H'],['Cushion vs line','EDGE'],['Matchup (DvP)','MATCH']].map(([l,k])=>`<tr><td>${l}</td><td>${pct(sc.parts[k])}</td><td>${Math.round(W[k]*100)}%</td><td>${r1(W[k]*sc.parts[k]*100)}</td></tr>`).join('')}
+    ${[['L10 hit rate','L10'],['L5 hit rate','L5'],['Season hit rate','SZN'],['vs opponent','H2H'],['Cushion vs line','EDGE'],['Matchup '+(sc.mu?sc.mu.grade:''),'MATCH'],['Category '+(PS.side>0?'Over':'Under')+' rate','CAT']].map(([l,k])=>`<tr><td>${l}</td><td>${pct(sc.parts[k])}</td><td>${Math.round(W[k]*100)}%</td><td>${r1(W[k]*sc.parts[k]*100)}</td></tr>`).join('')}
+    ${sc.mu&&sc.mu.comps.length?`<tr><td colspan="4" class="small mut" style="white-space:normal;text-align:left">Matchup parts: ${sc.mu.comps.map(c=>`${esc(c.label)} ${Math.round(c.part*100)} (${esc(c.txt)})`).concat(sc.mu.rest.map(esc)).join(' · ')} → ${sc.mu.pts>=0?'+':''}${sc.mu.pts} pts vs a neutral matchup</td></tr>`:''}
     <tr><td><b>Key injuries</b></td><td colspan="2" class="mut" style="white-space:normal">${(()=>{const k=keyInj(pid); const sg=PS.side>0?1:-1; const n=k.notes.map(x=>`${esc(x.t)} ${x.v*sg>0?'+':''}${r1(x.v*sg)}`); if(k.self) n.push(`he is ${esc(k.selfSt)} ${k.self}`); return n.join('<br>')||'none affecting volume or coverage';})()}</td><td><b style="color:${sc.inj>0?'var(--green)':sc.inj<0?'var(--red)':'inherit'}">${sc.inj>0?'+':''}${sc.inj}</b></td></tr></table></details>
    <div class="row" style="flex-wrap:wrap"><h2 class="sp">${PS.win==='SZN'?season+' season':PS.win==='H2H'?'vs '+(a.opp||'opponent'):'Last '+games.length+' games'} vs ${PS.line}</h2>
    <div class="seg" id="pwin">${[['5','L5'],['10','L10'],['20','L20'],['SZN','Season'],['H2H','H2H']].map(([k,l])=>`<button data-w="${k}" class="${String(PS.win)===k?'on':''}">${l}</button>`).join('')}</div></div>${chart}
@@ -691,7 +794,7 @@ const DS = {pos:'WR', sort:'rec_yds', dir:-1, mode:'def'};
 function viewDefense(){
   return `<h1>${DS.mode==='def'?'Defense vs Position':'Team Offense by Position'}</h1><p class="sub">${DS.mode==='def'?`${S.stats.season} per-game production allowed to each position. Rank 1 = toughest, 32 = softest (allows the most).`:`${S.stats.season} per-game production by each team's players at a position. Rank 1 = most productive.`}</p>
   <div class="seg" id="dmode"><button data-d="def" class="${DS.mode==='def'?'on':''}">Defense allowed</button><button data-d="off" class="${DS.mode==='off'?'on':''}">Offense produced</button></div>
-  <div class="tabs" id="dpos">${['QB','RB','WR','TE'].map(p=>`<button data-p="${p}" class="${DS.pos===p?'on':''}">${p}</button>`).join('')}</div><div id="dtable"></div>`;
+  <div class="tabs" id="dpos">${S.POS_LIST.map(p=>`<button data-p="${p}" class="${DS.pos===p?'on':''}">${p}</button>`).join('')}</div><div id="dtable"></div>`;
 }
 function renderDefense(){
   const pos=DS.pos, ms=Object.keys(MK).filter(m=>MK[m].pos.includes(pos) && (pos==='QB' || !MK[m].dvp));
@@ -814,11 +917,22 @@ function viewInjuries(){
 }
 function renderInj(){
   const q=norm(IQ.q); const teams=Object.keys(S.injByTeam).sort().filter(t=>IQ.team==='all'||(IQ.team==='slate'?S.slateTeam[t]:t===IQ.team));
-  $('#ilist').innerHTML=`<div class="grid g3">${teams.map(t=>{const items=S.injByTeam[t].filter(i=>(!IQ.skill||['QB','RB','WR','TE','FB'].includes(i.pos))&&(!q||norm(i.name).includes(q))); if(!items.length) return '';
+  $('#ilist').innerHTML=`<div class="grid g3">${teams.map(t=>{const items=S.injByTeam[t].filter(i=>(!IQ.skill||!S.SKILL||S.SKILL.includes(i.pos))&&(!q||norm(i.name).includes(q))); if(!items.length) return '';
     return `<div class="card"><div class="row"><b>${t}</b>${S.slateTeam[t]?`<span class="mut small">${S.slateTeam[t].home?'vs':'@'} ${S.slateTeam[t].opp}</span>`:''}</div>${items.map(i=>{const pid=Object.keys(S.players).find(k=>S.players[k].team===t&&norm(S.players[k].name)===norm(i.name));
       return `<div style="padding:6px 0;border-bottom:1px solid var(--line)"><div class="row small"><span class="pill ${BAD_STATUS.test(i.status)?'r':'a'}">${esc(i.status)}</span>${pid?`<a href="#/player/${pid}"><b>${esc(i.name)}</b></a>`:`<b>${esc(i.name)}</b>`}<span class="mut">${esc(i.pos||'')}</span></div><div class="small mut">${esc(i.detail)}</div></div>`;}).join('')}</div>`;}).join('')}</div>`;
 }
 function bindInj(){ $('#iteam').onchange=e=>{IQ.team=e.target.value;renderInj();}; $('#iq').oninput=e=>{IQ.q=e.target.value;renderInj();}; $('#iskill').onchange=e=>{IQ.skill=e.target.checked;renderInj();}; renderInj(); }
+
+/* ----- category hit rates ----- */
+function viewCategories(){
+  const c=S.cats||{cats:{}}; const ms=[...new Set([...Object.keys(CAT_PRIOR[S.SPORT]||{}), ...Object.keys(c.cats||{})])];
+  const lab=m=>MK[m]?.label||m;
+  const row=(m,side)=>{const k=side>0?'over':'under'; const x=c.cats?.[m]?.[k]||[0,0,0]; const cr=catRate(m,side); const n=x[0]+x[1];
+    return `<tr><td>${esc(lab(m))}</td><td><span class="side ${side>0?'o':'u'}">${side>0?'Over':'Under'}</span></td><td>${x[0]}-${x[1]}${x[2]?`-${x[2]}P`:''}</td><td>${n?pct(x[0]/n):'–'}</td><td>${cr?pct(cr.prior):'<span class="mut">n/a</span>'}</td><td><b>${cr?pct(cr.rate):'–'}</b></td><td class="small mut" style="white-space:normal;text-align:left">${cr?esc(cr.src):'yes/no or 0.5 line: price carries it, no score factor'}</td></tr>`;};
+  return `<h1>Category hit rates</h1><p class="sub">${S.SPORT.toUpperCase()} · every real sportsbook line we stored is graded after the game is final (push = exact line, DNP = void). ${c.graded||0} lines graded so far${c.updated?`, last ${ago(c.updated)}`:''}.</p>
+  <div class="tbl"><table><tr><th>Market</th><th>Side</th><th>Our W-L</th><th>Our rate</th><th>Prior</th><th>Blended</th><th>Prior source</th></tr>${ms.map(m=>row(m,1)+(c.cats?.[m]?.under||CAT_PRIOR[S.SPORT]?.[m]?row(m,-1):'')).join('')}</table></div>
+  <p class="small mut">Blended = (prior × ${CAT_N0} + our hits) / (${CAT_N0} + our graded), so a small sample can't swing it; it becomes mostly our own data after a few hundred lines. In the score it's worth 10%: a 54% category adds about 2 points, a 46% one subtracts about 2.</p>`;
+}
 
 /* ----- data status ----- */
 function viewData(){
@@ -837,7 +951,7 @@ function viewData(){
    <p><b>Refresh schedule</b> — GitHub Actions at about 7 AM, 1 PM and 6 PM ET daily.</p></div>`;
 }
 function viewMore(){
-  return `<h1>More</h1><div class="card morelist" style="padding:0"><a href="#/trending">📈 Trending</a><a href="#/favorites">★ Watchlist</a><a href="#/injuries">🩹 Injury report</a><a href="#/data">⚙️ Data status</a></div>`;
+  return `<h1>More</h1><div class="card morelist" style="padding:0"><a href="#/trending">📈 Trending</a><a href="#/favorites">★ Watchlist</a><a href="#/injuries">🩹 Injury report</a><a href="#/categories">📊 Category hit rates</a><a href="#/data">⚙️ Data status</a><a href="${S.SPORT==='nfl'?'nhl/':'../'}">🔁 Switch to ${S.SPORT==='nfl'?'NHL':'NFL'}</a></div>`;
 }
 
 /* ---------- search ---------- */
@@ -870,17 +984,18 @@ function route(){
     else if(r==='slip'){ app.innerHTML=viewSlip(); bindSlip(); }
     else if(r==='injuries'){ app.innerHTML=viewInjuries(); bindInj(); }
     else if(r==='data'){ app.innerHTML=viewData(); }
+    else if(r==='categories'){ app.innerHTML=viewCategories(); }
     else if(r==='more'){ app.innerHTML=viewMore(); }
     else app.innerHTML=`<div class="empty card">Page not found. <a href="#/">Go home</a></div>`;
   }catch(e){ console.error(e); app.innerHTML=`<div class="banner err">Something went wrong rendering this page: ${esc(e.message)}</div>`; }
   if(r!=='player'||!route._same) window.scrollTo(0,0);
 }
 window.addEventListener('hashchange', route);
-(async()=>{
+document.addEventListener('DOMContentLoaded', async()=>{
   bindSearch(); updSlipCount();
   try{ await load(); banner(); route(); }
   catch(e){ console.error(e); $('#app').innerHTML=`<div class="banner err">Couldn't load data (${esc(e.message)}). The first data refresh may not have run yet — try again in a few minutes.</div>`; }
-})();
+});
 /* ⚠️ popover: hover on desktop, tap on mobile (cards clip overflow, so it's a fixed-position layer) */
 (function(){
   let tip=null, cur=null;
