@@ -65,6 +65,7 @@ async function load(){
     getJSON('stats.json'), getJSON('games.json'), getJSON('injuries.json',{items:[]}),
     getJSON('props.json',{lines:[]}), getJSON('line_history.json',{}), getJSON('status.json',{})]);
   Object.assign(S,{stats,games,inj,props,hist,status});
+  S.snaps = await getJSON('snaps.json',{});
   S.splits = await getJSON('splits.json',{games:[]}); S.splitBy={}; for(const g of S.splits.games||[]) S.splitBy[g.away+'@'+g.home] ??= g;
   const cols = stats.cols;
   S.players = stats.players;
@@ -90,9 +91,10 @@ const KI_OPP = {QB:['DL','CB','S'], RB:['DL','LB'], WR:['CB','S'], TE:['LB','S']
 /* score points for the OVER side per fresh Out/Doubtful/IR key player (Questionable = 40%).
    Positive = helps his volume or matchup. */
 const KI_PTS = {
-  own:{ QB:{WR:-1.5,TE:-1,OL:-1}, RB:{RB:+4,OL:-1}, WR:{WR:+3,TE:+1.5,QB:-4}, TE:{TE:+3,WR:+2,QB:-4} },
-  opp:{ QB:{DL:+1,CB:+1.5,S:+1}, RB:{DL:+1,LB:+1.5}, WR:{CB:+2.5,S:+1}, TE:{LB:+1.5,S:+1.5} },
+  own:{ QB:{WR:-2.5,TE:-1.5,OL:-2}, RB:{RB:+6,OL:-2}, WR:{WR:+4,TE:+2,QB:-6}, TE:{TE:+4,WR:+2.5,QB:-6} },
+  opp:{ QB:{DL:+1.5,CB:+2.5,S:+1.5}, RB:{DL:+2,LB:+2}, WR:{CB:+4,S:+1.5}, TE:{LB:+2.5,S:+2.5} },
 };
+const KI_CAP = 12, KI_SELF_Q = -6;  // his own Questionable tag: -6 on either side (risk he sits or is limited)
 const KI_LAB = {own:'teammate', opp:'defender'};
 const kiW = st => /^questionable/i.test(st||'') ? .4 : 1;
 const kiShort = st => /^injured/i.test(st)?'IR':/^out/i.test(st)?'Out':/^doubt/i.test(st)?'D':/^quest/i.test(st)?'Q':st;
@@ -110,7 +112,8 @@ function keyInj(pid){
   res.own = pick(p.team, KI_OWN[pos], 'own');
   if(st) res.opp = pick(st.opp, KI_OPP[pos], 'opp');
   let t=0; for(const i of [...res.own,...res.opp]) t+=i.pts;
-  res.pts = Math.max(-8, Math.min(8, r1(t)));
+  res.pts = Math.max(-KI_CAP, Math.min(KI_CAP, r1(t)));
+  const me=injuryOf(p); res.self = me && /^questionable/i.test(me.status||'') ? KI_SELF_Q : 0; res.selfSt = me?.status;
   for(const i of [...res.own,...res.opp]) if(i.pts) res.notes.push({t:`${i.side==='own'?p.team:st.opp} ${i.grp} ${i.name} ${kiShort(i.status)} (${Math.round((i.snap||0)*100)}% snaps)`, v:i.pts});
   return (_ki[pid]=res);
 }
@@ -122,9 +125,9 @@ function warnIcon(pid){
   return `<span class="warn" tabindex="0" role="button" aria-label="${esc(tip)}">⚠️<span class="tip">${all.map(i=>`<span><i class="pill ${kiCls(i.status)}">${kiShort(i.status)}</i> ${esc(i.side==='own'?S.players[pid].team:S.slateTeam[S.players[pid].team]?.opp)} ${esc(i.grp)} <b>${esc(i.name)}</b>${i.fresh?'':' <em>long-term</em>'}</span>`).join('')}</span></span>`;
 }
 function kiCompact(pid){
-  const k=keyInj(pid), p=S.players[pid], opp=S.slateTeam[p.team]?.opp; if(!kiAll(k).length) return '';
+  const k=keyInj(pid), p=S.players[pid], opp=S.slateTeam[p.team]?.opp; if(!kiAll(k).length && !k.self) return '';
   const part=(arr,lab)=>arr.length?`<div><span class="mut">${lab}:</span> ${arr.slice(0,3).map(i=>`<span class="kit ${kiCls(i.status)}">${kiLine(i)}</span>`).join(' ')}${arr.length>3?` <span class="mut">+${arr.length-3}</span>`:''}</div>`:'';
-  return `<div class="ki small"><b>🩹 Key injuries${k.pts?` <span class="pill ${k.pts>0?'g':'r'}">${k.pts>0?'+':''}${k.pts} over</span>`:''}</b>${part(k.own,p.team)}${part(k.opp,opp?opp+' D':'Opp D')}</div>`;
+  return `<div class="ki small"><b>🩹 Key injuries${k.pts?` <span class="pill ${k.pts>0?'g':'r'}">${k.pts>0?'+':''}${k.pts} over</span>`:''}${k.self?` <span class="pill r">${k.self} (he's Q)</span>`:''}</b>${part(k.own,p.team)}${part(k.opp,opp?opp+' D':'Opp D')}</div>`;
 }
 function kiPanel(pid){
   const k=keyInj(pid), p=S.players[pid], opp=S.slateTeam[p.team]?.opp, pos=p.pos==='FB'?'RB':p.pos;
@@ -133,7 +136,7 @@ function kiPanel(pid){
   return `<h2>Key injuries</h2><div class="grid g2">
    <div class="card"><div class="small mut" style="margin-bottom:4px">${p.team} at ${KI_OWN[pos].join('/')} (usage & volume)</div>${list(k.own,'own')}</div>
    <div class="card"><div class="small mut" style="margin-bottom:4px">${opp?opp+' defense':'Opponent'} at ${KI_OPP[pos].join('/')} (who covers him)</div>${opp?list(k.opp,'opp'):'<div class="mut small">No game this week</div>'}</div></div>
-   <p class="small mut">Key = season snap share above a starter threshold (nflverse snap counts). Score adjustment for the Over (reversed for the Under): ${k.pts>0?'+':''}${k.pts} pts, from fresh absences only — players already out for weeks are labeled long-term because his recent stats already reflect them. Questionable counts 40%. Capped at ±8.</p>`;
+   <p class="small mut">Key = season snap share above a starter threshold (nflverse snap counts). Score adjustment for the Over (reversed for the Under): ${k.pts>0?'+':''}${k.pts} pts${k.self?`, plus ${k.self} because he is listed ${esc(k.selfSt)}`:''}, from fresh absences only — players already out for weeks are labeled long-term because his recent stats already reflect them. Questionable teammates/defenders count 40%. Capped at ±12.</p>`;
 }
 
 /* ---------- defense vs position ---------- */
@@ -251,8 +254,8 @@ function score(a){
   const match = a.dvp ? (a.side>0 ? (a.dvp.rank-1)/31 : (32-a.dvp.rank)/31) : .5;
   const parts = {L10:hr('L10')??.5, L5:hr('L5')??.5, SZN:szn, H2H:h2h, EDGE:edge, MATCH:match};
   let t=0; for(const k in W) t+=W[k]*parts[k];
-  const ki = a.pid ? keyInj(a.pid) : null, adj = ki ? ki.pts * (a.side>0?1:-1) : 0;
-  return {score:Math.max(0,Math.min(100,Math.round(t*100+adj))), parts, inj:adj};
+  const ki = a.pid ? keyInj(a.pid) : null, adj = ki ? r1(ki.pts * (a.side>0?1:-1) + ki.self) : 0;
+  return {score:Math.max(0,Math.min(100,Math.round(t*100+adj))), base:Math.round(t*100), parts, inj:adj};
 }
 function reasons(a, p){
   const M = MK[a.m], side = a.side>0?'Over':'Under', out=[];
@@ -264,7 +267,7 @@ function reasons(a, p){
     out.push(`${a.opp} allows ${a.dvp.v} ${M.label.toLowerCase()}/game to ${pos}s — ${ordinal(33-a.dvp.rank)} most (${soft?'soft':tough?'tough':'average'} matchup)`); }
   if(a.H2H && a.H2H.n) out.push(`vs ${a.opp} since 2024: ${f(a.H2H)}`);
   if(a.VENUE && a.VENUE.n>=3) out.push(`${a.isHome?'Home':'Away'} games (2 seasons): ${f(a.VENUE)}`);
-  { const k=keyInj(a.pid); if(k.pts){ const adj=k.pts*(a.side>0?1:-1); const sg=a.side>0?1:-1; out.push(`🩹 Injuries ${adj>0?'+':''}${r1(adj)} pts: ${k.notes.map(n=>`${n.t} ${n.v*sg>0?'+':''}${r1(n.v*sg)}`).join('; ')}`); } }
+  { const k=keyInj(a.pid); if(k.self) out.push(`🩹 He is listed ${k.selfSt}: ${k.self} pts`); if(k.pts){ const adj=k.pts*(a.side>0?1:-1); const sg=a.side>0?1:-1; out.push(`🩹 Injuries ${adj>0?'+':''}${r1(adj)} pts: ${k.notes.map(n=>`${n.t} ${n.v*sg>0?'+':''}${r1(n.v*sg)}`).join('; ')}`); } }
   if(a.streak>=3) out.push(a.m==='anytime_td'?`🔥 Scored in ${a.streak} straight games`:`🔥 ${a.streak}-game ${side.toLowerCase()} streak`);
   return out;
 }
@@ -363,7 +366,7 @@ function propCard(row, side, rank){
   const a = side>0?row.over.a:row.under.a, sc=score(a), p=row.p, M=MK[row.m];
   const sideTxt = row.m==='anytime_td' ? 'YES' : side>0?'OVER':'UNDER';
   const fav = isFav(row.pid,row.m,side);
-  return `<div class="card pick">
+  return `<div class="card pick" data-go="#/player/${row.pid}?m=${row.m}&line=${row.line}&side=${side}" tabindex="0" role="link" aria-label="Open ${esc(p.name)} stats">
     ${rank?`<div class="rank">#${rank}</div>`:''}
     <div class="row">${headshot(p)}<div class="sp"><a class="pname" href="#/player/${row.pid}?m=${row.m}">${esc(p.name)}</a>${warnIcon(row.pid)}
       <div class="small mut">${p.pos} · ${p.team} ${a.isHome?'vs':'@'} ${a.opp} · ${fmtTime(row.g.ko)}</div></div>
@@ -413,7 +416,7 @@ function viewHome(){
   return `<h1>Today's Top Picks</h1>
   <p class="sub">${slateTxt}. Ranked by the PropScout score — every input is shown so you can judge it yourself.</p>
   <details class="card small" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700">How the score works</summary>
-   <p class="mut">Score (0–100) = 25% last-10 hit rate + 20% last-5 + 15% season + 10% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 15% cushion (last-10 average vs the line) + 15% matchup (how much this defense allows to the position, ranked 1–32 from this season's games). Then a small <b>key-injury adjustment</b> (capped ±8): e.g. +3 when a starting WR teammate is out, +4 when the other RB is out, −4 when his QB is out, +2.5 when the opponent's starting CB is out; Questionable counts 40%, and only fresh absences count. It's listed in each pick's reasons, and ⚠️ next to a name shows the key injuries around him. Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
+   <p class="mut">Score (0–100) = 25% last-10 hit rate + 20% last-5 + 15% season + 10% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 15% cushion (last-10 average vs the line) + 15% matchup (how much this defense allows to the position, ranked 1–32 from this season's games). Then a <b>key-injury adjustment</b> (capped ±12): +4 per starting WR teammate out (WR/TE), +6 when the other lead RB is out, −6 when his QB is out, −2 per starting OL out (RB/QB), +4 when the opponent's starting CB is out (WR), +2.5 for a starting LB/S out (TE); teammates/defenders listed Questionable count 40% and only fresh absences count; −6 if he himself is Questionable. It's listed in each pick's reasons, and ⚠️ next to a name shows the key injuries around him. Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
   ${slateStrip()}
   ${(S.splits.games||[]).length?`<details class="card small" style="margin-bottom:12px"><summary style="cursor:pointer;font-weight:700">📊 Betting splits (% bets / % money) for this week's games</summary><div class="grid g2" style="margin-top:10px">${S.slate.map(g=>splitsCard(g,true)).join('')}</div></details>`:''}
   <div class="tabs" id="htabs">${[['all','All'],['over','Overs'],['under','Unders'],...BOARD_MK.map(m=>[m,MK[m].label])].map(([k,l])=>`<button data-h="${k}" class="${HS.f===k?'on':''}">${l}</button>`).join('')}</div>
@@ -542,11 +545,15 @@ function renderPlayer(){
      <div><span>Streak</span><b>${a.streak}</b></div>
      <div><span>Score</span><b>${sc.score}</b></div>
    </div>
+   <details class="card small" style="margin:10px 0" open><summary style="cursor:pointer;font-weight:700">Score breakdown: ${sc.base} base ${sc.inj>=0?'+':''}${sc.inj} injuries = ${sc.score}</summary>
+    <table style="margin-top:6px"><tr><th>Factor</th><th>Value</th><th>Weight</th><th>Points</th></tr>
+    ${[['L10 hit rate','L10'],['L5 hit rate','L5'],['Season hit rate','SZN'],['vs opponent','H2H'],['Cushion vs line','EDGE'],['Matchup (DvP)','MATCH']].map(([l,k])=>`<tr><td>${l}</td><td>${pct(sc.parts[k])}</td><td>${Math.round(W[k]*100)}%</td><td>${r1(W[k]*sc.parts[k]*100)}</td></tr>`).join('')}
+    <tr><td><b>Key injuries</b></td><td colspan="2" class="mut" style="white-space:normal">${(()=>{const k=keyInj(pid); const sg=PS.side>0?1:-1; const n=k.notes.map(x=>`${esc(x.t)} ${x.v*sg>0?'+':''}${r1(x.v*sg)}`); if(k.self) n.push(`he is ${esc(k.selfSt)} ${k.self}`); return n.join('<br>')||'none affecting volume or coverage';})()}</td><td><b style="color:${sc.inj>0?'var(--green)':sc.inj<0?'var(--red)':'inherit'}">${sc.inj>0?'+':''}${sc.inj}</b></td></tr></table></details>
    <div class="row" style="flex-wrap:wrap"><h2 class="sp">${PS.win==='SZN'?season+' season':PS.win==='H2H'?'vs '+(a.opp||'opponent'):'Last '+games.length+' games'} vs ${PS.line}</h2>
    <div class="seg" id="pwin">${[['5','L5'],['10','L10'],['20','L20'],['SZN','Season'],['H2H','H2H']].map(([k,l])=>`<button data-w="${k}" class="${String(PS.win)===k?'on':''}">${l}</button>`).join('')}</div></div>${chart}
    <div class="legend"><span><b style="color:var(--green)">■</b> ${PS.side>0?'over':'under'} hit</span><span><b style="color:var(--red)">■</b> miss</span><span>- - line</span></div>`;
   // extra panels
-  $('#pextra').innerHTML = [kiPanel(pid), matchupPanel(a,p), S.slateTeam[p.team]?`<h2>Game betting splits</h2>${splitsCard(S.slateTeam[p.team].g)||'<div class="card small mut">No splits posted for this game yet.</div>'}`:'', booksPanel(pid,m), teammatePanel(pid), splitsPanel(a,p), gameLog(a,p)].join('');
+  $('#pextra').innerHTML = [gameLog(a,p), kiPanel(pid), matchupPanel(a,p), S.slateTeam[p.team]?`<h2>Game betting splits</h2>${splitsCard(S.slateTeam[p.team].g)||'<div class="card small mut">No splits posted for this game yet.</div>'}`:'', booksPanel(pid,m), teammatePanel(pid), splitsPanel(a,p)].join('');
   bindPlayerExtra();
 }
 function barChart(games, f, line){
@@ -636,14 +643,31 @@ function splitsPanel(a,p){
    ${a.dvp?row(`vs bottom-11 soft D (${s})`,G.filter(g=>g.season===s && (dvpOf(g.opp,a.m,p.pos)?.rank||0)>=22)):''}
    </table></div>`;
 }
+const GL = {season:'all'};
 function gameLog(a,p){
-  const f=MK[a.m].f, pos=p.pos==='FB'?'RB':p.pos;
-  const cols = pos==='QB'?[['completions','Cmp'],['attempts','Att'],['passing_yards','PaYd'],['passing_tds','PaTD'],['passing_interceptions','INT'],['carries','Car'],['rushing_yards','RuYd'],['rushing_tds','RuTD']]
-    :[['carries','Car'],['rushing_yards','RuYd'],['rushing_tds','RuTD'],['targets','Tgt'],['receptions','Rec'],['receiving_yards','ReYd'],['receiving_tds','ReTD']];
-  const rows=[...a.games].reverse().map(g=>{const v=f(g), hit=a.side>0?v>a.line:v<a.line, gm=S.gamesById[g.game];
-    let res=''; if(gm&&gm.hs!=null){const my=g.team===gm.home?gm.hs:gm.as, th=g.team===gm.home?gm.as:gm.hs; res=(my>th?'W ':my<th?'L ':'T ')+my+'-'+th;}
-    return `<tr class="${v===a.line?'push':hit?'hit':'miss'}"><td>${g.season} W${g.week}</td><td>${g.home===1?'vs':g.home===0?'@':'vs'} ${g.opp}</td><td class="hide-m">${res}</td>${cols.map(([c])=>`<td>${g[c]}</td>`).join('')}<td class="res">${v} ${v===a.line?'P':hit?'✓':'✗'}</td></tr>`;}).join('');
-  return `<h2>Game log</h2><div class="tbl"><table><tr><th>Game</th><th>Opp</th><th class="hide-m">Result</th>${cols.map(c=>`<th>${c[1]}</th>`).join('')}<th>${MK[a.m].short}</th></tr>${rows}</table></div>`;
+  const f=MK[a.m].f, pos=p.pos==='FB'?'RB':p.pos, season=S.stats.season, snaps=S.snaps?.[a.pid]||{};
+  const cols = pos==='QB'
+    ? [['completions','Cmp'],['attempts','Att'],['passing_yards','PaYd'],['passing_tds','PaTD'],['passing_interceptions','INT'],['carries','Car'],['rushing_yards','RuYd'],['rushing_tds','RuTD']]
+    : pos==='RB'
+    ? [['carries','Car'],['rushing_yards','RuYd'],['rushing_tds','RuTD'],['targets','Tgt'],['receptions','Rec'],['receiving_yards','ReYd'],['receiving_tds','ReTD']]
+    : [['targets','Tgt'],['receptions','Rec'],['receiving_yards','ReYd'],['receiving_tds','ReTD'],['carries','Car'],['rushing_yards','RuYd']];
+  const hasSnap = Object.keys(snaps).length>0;
+  const seasons=[...new Set(a.games.map(g=>g.season))].sort((x,y)=>y-x);
+  const G=[...a.games].reverse().filter(g=>GL.season==='all'||g.season===+GL.season);
+  let hits=0, n=0;
+  const rows=G.map(g=>{const v=f(g), hit=a.side>0?v>a.line:v<a.line, push=v===a.line, gm=S.gamesById[g.game];
+    if(!push){n++; if(hit) hits++;}
+    let res=''; if(gm&&gm.hs!=null){const my=g.team===gm.home?gm.hs:gm.as, th=g.team===gm.home?gm.as:gm.hs; res=`<span class="${my>th?'wl-w':my<th?'wl-l':''}">${my>th?'W':my<th?'L':'T'}</span> ${my}-${th}`;}
+    const dt = gm?.date ? new Date(gm.date+'T12:00:00').toLocaleDateString('en-US',{month:'numeric',day:'numeric'}) : '';
+    const sn = snaps[g.game];
+    return `<tr class="${push?'push':hit?'hit':'miss'}"><td>${dt}<div class="small mut">${g.season!==season?"'"+String(g.season).slice(2)+' ':''}W${g.week}${gm&&gm.type&&gm.type!=='REG'?' '+gm.type:''}</div></td>
+      <td>${g.home===1?'vs':g.home===0?'@':'vs'} <b>${g.opp}</b>${g.team!==p.team?`<div class="small mut">w/ ${g.team}</div>`:''}</td><td>${res}</td>
+      ${hasSnap?`<td>${sn!=null?Math.round(sn*100)+'%':'<span class="mut">–</span>'}</td>`:''}
+      ${cols.map(([c])=>`<td>${g[c]}</td>`).join('')}<td class="res"><b>${v}</b> ${push?'P':hit?'✓':'✗'}</td></tr>`;}).join('');
+  return `<h2 id="gamelog">Game log — every game</h2>
+   <div class="row small" style="flex-wrap:wrap;gap:8px;margin-bottom:8px"><div class="seg" id="glseason">${[['all','All'],...seasons.map(x=>[String(x),String(x)])].map(([k,l])=>`<button data-gl="${k}" class="${String(GL.season)===k?'on':''}">${l}</button>`).join('')}</div>
+    <span class="mut">${MK[a.m].label} ${a.side>0?'over':'under'} ${a.line}: <b style="color:var(--text)">${hits}/${n}</b> (${n?Math.round(hits/n*100):0}%) in ${G.length} games shown · green = hit, red = miss${hasSnap?' · Snap% = offensive snap share (nflverse)':''}</span></div>
+   <div class="tbl"><table class="glog"><tr><th>Date</th><th>Opp</th><th>Result</th>${hasSnap?'<th>Snap%</th>':''}${cols.map(c=>`<th>${c[1]}</th>`).join('')}<th>${MK[a.m].short} vs ${a.line}</th></tr>${rows||`<tr><td colspan="12" class="mut">No games</td></tr>`}</table></div>`;
 }
 function bindPlayer(){
   const pid=PS.pid;
@@ -658,6 +682,7 @@ function bindPlayer(){
 }
 function bindPlayerExtra(){
   $$('#pwin button').forEach(b=>b.onclick=()=>{PS.win=b.dataset.w; renderPlayer();});
+  $$('#glseason button').forEach(b=>b.onclick=()=>{GL.season=b.dataset.gl; const y=scrollY; renderPlayer(); scrollTo(0,y);});
   $$('[data-without]').forEach(b=>b.onclick=()=>{const t=b.dataset.without; PS.without=PS.without.includes(t)?PS.without.filter(x=>x!==t):[...PS.without,t]; renderPlayer();});
 }
 
@@ -694,7 +719,7 @@ function viewTrending(){
   }
   streaks.sort((x,y)=>y.a.streak-x.a.streak); up.sort((x,y)=>y.d-x.d); down.sort((x,y)=>x.d-y.d);
   const favCount={}; FAV.forEach(f=>{const k=f.pid+'|'+f.m; favCount[k]=(favCount[k]||0)+1;});
-  const tr=(x,txt)=>`<tr><td><a href="#/player/${x.r.pid}?m=${x.r.m}"><b>${esc(x.r.p.name)}</b></a>${warnIcon(x.r.pid)} <span class="mut small">${x.r.p.pos} ${x.r.p.team}</span></td><td>${MK[x.r.m].label}</td><td>${txt}</td></tr>`;
+  const tr=(x,txt)=>`<tr class="golink" data-go="#/player/${x.r.pid}?m=${x.r.m}"><td><a href="#/player/${x.r.pid}?m=${x.r.m}"><b>${esc(x.r.p.name)}</b></a>${warnIcon(x.r.pid)} <span class="mut small">${x.r.p.pos} ${x.r.p.team}</span></td><td>${MK[x.r.m].label}</td><td>${txt}</td></tr>`;
   return `<h1>Trending</h1><p class="sub">Hot streaks and usage shifts on this week's slate.</p>
   <div class="grid g2">
    <div><h2>🔥 Longest active streaks vs line</h2><div class="tbl"><table><tr><th>Player</th><th>Prop</th><th>Streak</th></tr>${streaks.slice(0,20).map(x=>tr(x,`<span class="side ${x.sd>0?'o':'u'}">${x.r.m==='anytime_td'?'YES':x.sd>0?'O':'U'} ${x.r.m==='anytime_td'?'':x.r.line}</span> ${x.a.streak} straight`)).join('')||'<tr><td colspan=3 class="mut">None</td></tr>'}</table></div></div>
@@ -709,7 +734,7 @@ function viewFavorites(){
   if(!FAV.length) return `<h1>Watchlist</h1><div class="empty card">No starred props yet. Tap ★ on any prop.</div>`;
   const cards=FAV.map(f=>{const p=S.players[f.pid]; if(!p) return ''; const cur=lineFor(f.pid,f.m); const line=cur?.line??f.line;
     const a=analyze(f.pid,f.m,line,f.side), sc=score(a), st=S.slateTeam[p.team];
-    return `<div class="card"><div class="row">${headshot(p)}<div class="sp"><a class="pname" href="#/player/${f.pid}?m=${f.m}">${esc(p.name)}</a>${warnIcon(f.pid)}<div class="small mut">${p.pos} · ${p.team}${st?` ${st.home?'vs':'@'} ${st.opp} · ${fmtTime(st.g.ko)}`:' · not on slate'}</div></div><button class="star on" data-fav="${f.pid}|${f.m}|${f.line}|${f.side}">★</button></div>
+    return `<div class="card pick" data-go="#/player/${f.pid}?m=${f.m}&line=${line}&side=${f.side}" tabindex="0" role="link"><div class="row">${headshot(p)}<div class="sp"><a class="pname" href="#/player/${f.pid}?m=${f.m}">${esc(p.name)}</a>${warnIcon(f.pid)}<div class="small mut">${p.pos} · ${p.team}${st?` ${st.home?'vs':'@'} ${st.opp} · ${fmtTime(st.g.ko)}`:' · not on slate'}</div></div><button class="star on" data-fav="${f.pid}|${f.m}|${f.line}|${f.side}">★</button></div>
       <div class="row" style="margin:8px 0"><span class="side ${f.side>0?'o':'u'}">${f.m==='anytime_td'?'YES':f.side>0?'OVER':'UNDER'}</span><b>${f.m==='anytime_td'?'':line} ${MK[f.m].label}</b>${line!==f.line?`<span class="pill a">saved at ${f.line}</span>`:''}<span class="sp"></span><b>${sc.score}</b></div>
       ${hrChips(a)}<div style="margin-top:8px"><button class="btn" data-slip="${f.pid}|${f.m}|${line}|${f.side}">+ Slip</button></div></div>`;}).join('');
   return `<h1>Watchlist</h1><p class="sub">${FAV.length} starred props (saved in this browser), re-scored against the latest line.</p><div class="grid g3">${cards}</div>`;
@@ -866,7 +891,15 @@ window.addEventListener('hashchange', route);
     let x=Math.min(Math.max(8,r.left+r.width/2-w/2), innerWidth-w-8), y=r.bottom+6; if(y+h>innerHeight-8) y=Math.max(8,r.top-h-6);
     tip.style.left=x+'px'; tip.style.top=y+'px'; };
   document.addEventListener('mouseover',e=>{ const w=e.target.closest?.('.warn'); if(w && matchMedia('(hover:hover)').matches) show(w); else if(!w && cur && matchMedia('(hover:hover)').matches) hide(); });
-  document.addEventListener('click',e=>{ const w=e.target.closest?.('.warn'); if(w){ e.preventDefault(); e.stopPropagation(); cur===w?hide():show(w); } else hide(); }, true);
+  document.addEventListener('click',e=>{ const w=e.target.closest?.('.warn'); if(w){ e.preventDefault(); e.stopPropagation(); (cur===w && !matchMedia('(hover:hover)').matches)?hide():show(w); } else hide(); }, true);
   document.addEventListener('keydown',e=>{ if(e.key==='Escape') hide(); if(e.key==='Enter' && document.activeElement?.classList.contains('warn')) show(document.activeElement); });
   addEventListener('scroll',hide,{passive:true}); addEventListener('hashchange',hide);
 })();
+
+/* tap/click anywhere on a player card or row -> his player page (game log); buttons, links, inputs and ⚠️ keep their own action */
+document.addEventListener('click', e=>{
+  const c=e.target.closest?.('[data-go]'); if(!c) return;
+  if(e.target.closest('button,a,input,select,label,textarea,.warn,summary')) return;
+  location.hash=c.dataset.go;
+});
+document.addEventListener('keydown', e=>{ if(e.key==='Enter' && e.target?.dataset?.go && !e.target.closest('button,a,input')) location.hash=e.target.dataset.go; });

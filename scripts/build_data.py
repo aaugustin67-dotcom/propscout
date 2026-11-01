@@ -159,8 +159,9 @@ def load_snaps(season):
         team_weeks.setdefault(t, set()).add(wk)
         pct = max(float(r.get("offense_pct") or 0), float(r.get("defense_pct") or 0))
         k = (norm(r["player"]), t)
-        q = ply.setdefault(k, {"pos": r["position"], "w": {}})
+        q = ply.setdefault(k, {"pos": r["position"], "w": {}, "g": {}})
         q["w"][wk] = pct
+        q["g"][r["game_id"]] = round(float(r.get("offense_pct") or 0), 2)
     note("snaps", "ok", f"{len(rows)} rows, through week {max(max(v) for v in team_weeks.values())}")
     return {"team_weeks": {t: sorted(v) for t, v in team_weeks.items()}, "players": ply}
 
@@ -406,7 +407,18 @@ def main():
     inj = load_injuries()
     if inj is None:
         inj = load_json(os.path.join(OUT, "injuries.json"), {"items": []}).get("items", [])
-    inj = enrich_injuries(inj, load_snaps(cur))
+    snaps = load_snaps(cur)
+    inj = enrich_injuries(inj, snaps)
+    # per-game offensive snap share for skill players (player page game log)
+    snap_out = {}
+    prev = load_snaps(cur - 1)
+    for src in [x for x in (snaps, prev) if x]:
+        for pid, p in players.items():
+            teams = {r[3] for r in logs.get(pid, [])}
+            for t in teams:
+                q = src["players"].get((norm(p["name"]), t))
+                if q: snap_out.setdefault(pid, {}).update(q["g"])
+    save("snaps.json", snap_out)
     by_norm = {}
     for pid, p in players.items():
         if p["last"][0] == cur or pid not in by_norm.values():
