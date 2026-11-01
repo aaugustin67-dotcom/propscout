@@ -105,6 +105,8 @@ tr.hit td.res{color:var(--green);font-weight:800}tr.miss td.res{color:var(--red)
   h1{font-size:21px}
   main{padding:12px 10px 90px}
   .hide-m{display:none}
+  .kv{grid-template-columns:repeat(3,1fr)}
+  .kv b{font-size:16px}
 }
 .slate{display:flex;gap:8px;overflow-x:auto;padding:2px 0 10px;margin-bottom:4px;scrollbar-width:thin}
 .slate .game{flex:none;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:132px}
