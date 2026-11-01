@@ -433,6 +433,76 @@ function buildBoard(){
   S.board=out; S.hasBook=hasBook;
 }
 
+/* ---------- projection & sorting ----------
+   Projection = recency-weighted average of his last 10 games (weight 0.85^k, k = games ago, so the latest game
+   counts 1.0, the one before 0.85, ... the 10th-last 0.23) x matchup multiplier (1 + 0.20 x (matchup composite for the
+   Over - 0.5)), i.e. at most +/-10% for an A+/F- matchup. Uses the same games as the hit rates (honors "without" filters). */
+const PROJ_DECAY = .85, PROJ_MU = .20;
+function proj(a){
+  if(a._pj!==undefined) return a._pj;
+  const vals=a.games.slice(-10).map(MK[a.m].f); if(!vals.length) return (a._pj=null);
+  let w=0, t=0; vals.forEach((v,i)=>{ const k=vals.length-1-i, wt=Math.pow(PROJ_DECAY,k); w+=wt; t+=wt*v; });
+  const wa=t/w, mu=a.pid?matchup(a):null, op = mu&&mu.comps.length ? (a.side>0?mu.part:1-mu.part) : .5;
+  const mult=1+PROJ_MU*(op-.5), v=wa*mult;
+  return (a._pj={wa, mult, v, n:vals.length, d:v-a.line, p:a.line>0?(v-a.line)/a.line:null});
+}
+function streaks(a){ // consecutive games over / under this line, most recent backwards (a push ends both)
+  if(a._st) return a._st; const vals=a.games.map(MK[a.m].f); let o=0,u=0;
+  for(let i=vals.length-1;i>=0&&vals[i]>a.line;i--) o++; for(let i=vals.length-1;i>=0&&vals[i]<a.line;i--) u++;
+  return (a._st={o,u});
+}
+function bestPrice(row, side){ const b=row.book; if(!b) return null; const x=side>0?b.bestO:b.bestU; if(!x) return null; const o=side>0?x.over:x.under; return o==null?null:{o, book:x.book, imp:impP(o)}; }
+const sgn = x => (x>0?'+':'')+x;
+const SORTS = { // v(x) -> number (null sorts last either way); d = default direction (-1 high->low)
+  score:  {l:'PropScout score', d:-1, v:x=>x.sc},
+  price:  {l:'Odds: best price', d:-1, v:x=>{const b=bestPrice(x.row,x.side); return b?toDec(b.o):null;}},
+  imp:    {l:'Odds: implied prob.', d:-1, v:x=>bestPrice(x.row,x.side)?.imp ?? null},
+  L5:     {l:'Hit rate L5', d:-1, v:x=>x.a.L5?.r ?? null},
+  L10:    {l:'Hit rate L10', d:-1, v:x=>x.a.L10?.r ?? null},
+  streak: {l:'Streak (this side)', d:-1, v:x=>x.a.streak},
+  streakO:{l:'Streak: Overs in a row', d:-1, side:1, v:x=>streaks(x.a).o},
+  streakU:{l:'Streak: Unders in a row', d:-1, side:-1, v:x=>streaks(x.a).u},
+  projd:  {l:'Projection − line', d:-1, lean:1, v:x=>{const q=proj(x.a); return q?q.d:null;}},
+  projp:  {l:'Projection − line %', d:-1, lean:1, v:x=>proj(x.a)?.p ?? null},
+  avgd:   {l:'L10 avg − line', d:-1, lean:2, v:x=>x.a.avgL10==null?null:x.a.avgL10-x.a.line},
+  avgp:   {l:'L10 avg − line %', d:-1, lean:2, v:x=>x.a.avgL10==null||!x.a.line?null:(x.a.avgL10-x.a.line)/x.a.line},
+  mu:     {l:'Matchup grade', d:-1, v:x=>{const m=matchup(x.a); return m.comps.length?m.part:null;}},
+  time:   {l:'Game time', d:1, v:x=>new Date(x.row.g.ko).getTime()},
+};
+// for projection/average sorts, show each prop once, on the side the projection (or average) leans toward
+function leanSide(a, kind){ const d = kind===1 ? proj(a)?.d : (a.avgL10==null?null:a.avgL10-a.line); return d==null?null:(d>=0?1:-1); }
+let SORT = LS.get('sort', {k:'score', dir:-1}); if(!SORTS[SORT.k]) SORT={k:'score',dir:-1};
+function sortRows(rows){
+  const f=SORTS[SORT.k].v, dir=SORT.dir;
+  for(const x of rows) x._sv=f(x);
+  return rows.sort((x,y)=>{ const a=x._sv, b=y._sv; if(a==null&&b==null) return y.sc-x.sc; if(a==null) return 1; if(b==null) return -1; return dir*(a-b) || y.sc-x.sc; });
+}
+function metricBadge(x){ // the sorted metric, shown big on each card
+  const k=SORT.k; if(k==='score') return '';
+  const a=x.a, v=x._sv; let big='–', sm=SORTS[k].l;
+  if(k==='price'||k==='imp'){ const b=bestPrice(x.row,x.side); if(b){ big = k==='price'?fmtOdds(b.o):pct(b.imp); sm = k==='price'?`best price · ${esc(b.book)} · ${pct(b.imp)} implied`:`implied · best ${fmtOdds(b.o)} ${esc(b.book)}`; } else sm='no sportsbook price (model line)'; }
+  else if(k==='L5'||k==='L10'){ const h=a[k]; if(h){ big=pct(h.r); sm=`hit ${h.h}/${h.n} last ${k.slice(1)}`; } }
+  else if(k.startsWith('streak')){ const s=k==='streakO'?streaks(a).o:k==='streakU'?streaks(a).u:a.streak; const w=k==='streakO'?'Over':k==='streakU'?'Under':(x.side>0?'Over':'Under'); big=String(s); sm=`straight ${w}${s===1?'':'s'} of ${a.line}`; }
+  else if(k==='projd'||k==='projp'){ const q=proj(a); if(q){ big = k==='projd'?sgn(r1(q.d)):(q.p==null?'–':sgn(Math.round(q.p*100))+'%'); sm=`proj ${r1(q.v)} vs line ${a.line} (${sgn(r1(q.d))}${q.p!=null?`, ${sgn(Math.round(q.p*100))}%`:''})`; } }
+  else if(k==='avgd'||k==='avgp'){ if(a.avgL10!=null){ const d=a.avgL10-a.line; big = k==='avgd'?sgn(r1(d)):sgn(Math.round(d/a.line*100))+'%'; sm=`L10 avg ${r1(a.avgL10)} vs line ${a.line}`; } }
+  else if(k==='mu'){ const m=matchup(a); if(m.comps.length){ big=m.grade; sm=`matchup ${sgn(m.pts)} pts`; } }
+  else if(k==='time'){ big=fmtTime(x.row.g.ko).replace(' ET',''); sm='ET'; }
+  return `<div class="metric"><b>${big}</b><span>${sm}</span></div>`;
+}
+function sortBar(id){
+  const k=SORT.k, s=SORTS[k];
+  const dirTxt = SORT.dir<0 ? (k==='time'?'↓ Latest first':'↓ High → low') : (k==='time'?'↑ Earliest first':'↑ Low → high');
+  const note = (k==='price'||k==='imp') && !S.hasBook ? `<span class="small mut">No sportsbook prices loaded — model-line props sort last.</span>` : s.side ? `<span class="small mut">Showing the ${s.side>0?'Over':'Under'} side of every prop.</span>` : s.lean ? `<span class="small mut">Each prop shown once, on the side the ${s.lean===1?'projection':'average'} leans. High → low = furthest above the line (Over leans); low → high = furthest below (Under leans).${k.endsWith('p')?' % is relative to the line, so 0.5 lines produce huge %s.':''}</span>` : '';
+  return `<div class="sortbar" id="${id}"><label for="${id}k">Sort by</label><select id="${id}k">${Object.entries(SORTS).map(([kk,o])=>`<option value="${kk}" ${kk===k?'selected':''}>${o.l}</option>`).join('')}</select>
+    <button class="btn" id="${id}d" aria-label="Toggle sort direction">${dirTxt}</button>
+    <details class="pjhelp"><summary>ⓘ Projection</summary><p class="small">Projection = recency-weighted average of the last 10 games (latest game weight 1.0, each older game ×0.85, so the 10th-last counts 0.23) × matchup multiplier 1 + 0.20 × (matchup composite − 0.5), i.e. at most ±10% (A matchup ≈ +4–10%, F ≈ −4–10%). Diff = projection − line; % = diff ÷ line. Odds sorts use the best price across books for the side shown; implied probability includes the vig.</p></details>${note}</div>`;
+}
+function bindSortBar(id, rerender){
+  const sel=$('#'+id+'k'), btn=$('#'+id+'d'); if(!sel) return;
+  sel.onchange=()=>{ SORT={k:sel.value, dir:SORTS[sel.value].d}; LS.set('sort',SORT); rerender(); };
+  btn.onclick=()=>{ SORT.dir*=-1; LS.set('sort',SORT); rerender(); };
+}
+
 /* ---------- favorites & slip ---------- */
 const keyOf = x => `${x.pid}|${x.m}|${x.side}`;
 function isFav(pid,m,side){ return FAV.some(f=>f.pid===pid&&f.m===m&&f.side===side); }
@@ -464,18 +534,18 @@ function priceStr(row, side){
   const b=row.book; if(!b) return `<span class="pill b" title="No sportsbook line loaded; line = median of last 10 games">model line</span>`;
   const x = side>0?b.bestO:b.bestU; return x?`<span class="pill">${fmtOdds(side>0?x.over:x.under)} ${esc(x.book)}</span>`:'';
 }
-function propCard(row, side, rank){
+function propCard(row, side, rank, x){
   const a = side>0?row.over.a:row.under.a, sc=score(a), p=row.p, M=MK[row.m];
   const sideTxt = row.m==='anytime_td' ? 'YES' : side>0?'OVER':'UNDER';
   const fav = isFav(row.pid,row.m,side);
   return `<div class="card pick" data-go="#/player/${row.pid}?m=${row.m}&line=${row.line}&side=${side}" tabindex="0" role="link" aria-label="Open ${esc(p.name)} stats">
-    ${rank?`<div class="rank">#${rank}</div>`:''}
+    ${rank?`<div class="rank">#${rank}</div>`:''}${x?metricBadge(x):''}
     <div class="row">${headshot(p)}<div class="sp"><a class="pname" href="#/player/${row.pid}?m=${row.m}">${esc(p.name)}</a>${warnIcon(row.pid)}
       <div class="small mut">${p.pos} · ${p.team} ${a.isHome?'vs':'@'} ${a.opp} · ${fmtTime(row.g.ko)}</div></div>
       <button class="star ${fav?'on':''}" data-fav="${row.pid}|${row.m}|${row.line}|${side}" title="Watchlist">★</button></div>
     <div class="row" style="margin-top:10px"><span class="side ${side>0?'o':'u'}">${sideTxt}</span><b class="big" style="font-size:18px">${row.m==='anytime_td'?'':row.line} ${M.label}</b><span class="sp"></span>${priceStr(row,side)}</div>
     <div style="margin-top:10px">${hrChips(a)}</div>
-    <div class="row small" style="margin-top:8px;flex-wrap:wrap;gap:6px">${dvpPill(a,p)} ${injPill(row.inj)} <span class="pill">L10 avg ${a.avgL10!=null?r1(a.avgL10):'–'}</span>${a.streak>=3?`<span class="pill g">🔥 ${a.streak} straight</span>`:''}</div>
+    <div class="row small" style="margin-top:8px;flex-wrap:wrap;gap:6px">${dvpPill(a,p)} ${injPill(row.inj)} <span class="pill">L10 avg ${a.avgL10!=null?r1(a.avgL10):'–'}</span>${S.SPORT==='nfl'&&RECM.has(row.m)?(()=>{const t=a.games.slice(-5); return t.length?`<span class="pill b" title="Average targets, last ${t.length} games">Tgt L5 ${r1(avg(t.map(g=>g.targets||0)))}/g</span>`:'';})():''}${(()=>{const q=proj(a); return q?`<span class="pill ${(q.d*side)>0?'g':'r'}" title="Projection: recency-weighted L10 avg ${r1(q.wa)} × matchup ${q.mult.toFixed(2)}">Proj ${r1(q.v)} (${sgn(r1(q.d))})</span>`:'';})()}${a.streak>=3?`<span class="pill g">🔥 ${a.streak} straight</span>`:''}</div>
     ${kiCompact(row.pid)}
     <div class="row" style="margin-top:10px"><div class="sp"><div class="small mut">PropScout score</div><div class="scorebar"><i style="width:${sc.score}%"></i></div></div><div class="score">${sc.score}</div>
       <button class="btn" data-slip="${row.pid}|${row.m}|${row.line}|${side}">+ Slip</button></div>
@@ -507,21 +577,22 @@ function viewHome(){
       const sc=score(a); pool.push({row, side:sd, a, sc:sc.score});
     }
   }
-  pool.sort((x,y)=>y.sc-x.sc);
-  // diversify: max 2 props per player
-  const f=HS.f, filt=pool.filter(x=> f==='all' || (f==='over'&&x.side>0&&x.row.m!=='anytime_td') || (f==='under'&&x.side<0) || x.row.m===f);
+  const fs=SORTS[SORT.k].side, ln=SORTS[SORT.k].lean;
+  const f=HS.f, filt=pool.filter(x=>!fs||x.side===fs).filter(x=>!ln||x.row.m==='anytime_td'||leanSide(x.a,ln)===x.side).filter(x=> f==='all' || (f==='over'&&x.side>0&&x.row.m!=='anytime_td') || (f==='under'&&x.side<0) || x.row.m===f);
   // diversify: max 2 props per player, max 4 anytime TDs in the mixed view, book lines first when available
-  if(S.hasBook) filt.sort((x,y)=>(y.row.src==='book')-(x.row.src==='book') || y.sc-x.sc);
+  if(SORT.k==='score'){ filt.sort((x,y)=>y.sc-x.sc); if(S.hasBook) filt.sort((x,y)=>(y.row.src==='book')-(x.row.src==='book') || y.sc-x.sc); for(const x of filt) x._sv=x.sc; }
+  else sortRows(filt);
   const per={}, perM={}, top=[]; for(const x of filt){ if((per[x.row.pid]||0)>=2) continue; if(f==='all'&&x.row.m==='anytime_td'&&(perM.atd||0)>=4) continue;
     per[x.row.pid]=(per[x.row.pid]||0)+1; if(x.row.m==='anytime_td') perM.atd=(perM.atd||0)+1; top.push(x); if(top.length>=HS.n) break; }
   const slateTxt = S.slate.length ? `${S.slateLabel?S.slateLabel():'Week '+S.slate[0].week} · ${S.slate.length} games · next ${S.SPORT==='nhl'?'puck drop':'kickoff'} ${fmtTime(S.slate.find(g=>new Date(g.ko)>now)?.ko)}` : 'No upcoming games found';
   return `<h1>Today's Top Picks</h1>
-  <p class="sub">${slateTxt}. Ranked by the PropScout score — every input is shown so you can judge it yourself.</p>
+  <p class="sub">${slateTxt}. ${SORT.k==='score'?'Ranked by the PropScout score':'Sorted by '+SORTS[SORT.k].l.toLowerCase()+(SORT.dir<0?' (high → low)':' (low → high)')} — every input is shown so you can judge it yourself.</p>
   <details class="card small" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700">How the score works</summary>
    <p class="mut">Score (0–100) = 20% last-10 hit rate + 16% last-5 + 12% season + 7% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 13% cushion (last-10 average vs the line) + 22% matchup (graded A–F: defense vs position season 35% and recent 20%, game environment from implied team total & game script 20%, pace 10%, pass rush / opposing goalie 15%, NHL rest) + 10% category base rate (how often this market's Overs or Unders hit: a published prior blended with our own graded lines, see <a href="#/categories" style="color:var(--green)">Category hit rates</a>). Then a <b>key-injury adjustment</b> (capped ±12): +4 per starting WR teammate out (WR/TE), +6 when the other lead RB is out, −6 when his QB is out, −2 per starting OL out (RB/QB), +4 when the opponent's starting CB is out (WR), +2.5 for a starting LB/S out (TE); teammates/defenders listed Questionable count 40% and only fresh absences count; −6 if he himself is Questionable. It's listed in each pick's reasons, and ⚠️ next to a name shows the key injuries around him. Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
   ${slateStrip()}
   ${(S.splits.games||[]).length?`<details class="card small" style="margin-bottom:12px"><summary style="cursor:pointer;font-weight:700">📊 Betting splits (% bets / % money) for this week's games</summary><div class="grid g2" style="margin-top:10px">${S.slate.map(g=>splitsCard(g,true)).join('')}</div></details>`:''}
   <div class="tabs" id="htabs">${[['all','All'],['over','Overs'],['under','Unders'],...BOARD_MK.map(m=>[m,MK[m].label])].map(([k,l])=>`<button data-h="${k}" class="${HS.f===k?'on':''}">${l}</button>`).join('')}</div>
+  ${sortBar('hs')}
   ${top.length?`<div class="grid g2">${top.map((x,i)=>propWithWhy(x,i+1)).join('')}</div>`:`<div class="empty card">No picks available — the slate may be finished. Check back after the next data refresh.</div>`}
   ${top.length>=HS.n?`<div style="text-align:center;margin-top:14px"><button class="btn" id="hmore">Show more picks</button></div>`:''}
   <p class="small mut" style="margin-top:14px">See every prop on the <a href="#/board" style="color:var(--green)">Board</a>.</p>`;
@@ -535,10 +606,11 @@ function slateStrip(){
 function bindHome(){
   bindCommon($('#app'));
   $$('#htabs button').forEach(b=>b.onclick=()=>{HS.f=b.dataset.h; HS.n=12; route();});
+  bindSortBar('hs', ()=>{ const y=scrollY; route(); scrollTo(0,y); });
   const m=$('#hmore'); if(m) m.onclick=()=>{HS.n+=12; const y=scrollY; route(); scrollTo(0,y);};
 }
 function propWithWhy(x, rank){
-  const card = propCard(x.row, x.side, rank);
+  const card = propCard(x.row, x.side, rank, x);
   const why = reasons(x.a, x.row.p).map(r=>`<li>${esc(r)}</li>`).join('');
   return card.replace(/<\/div>\s*$/, `<ul class="why">${why}</ul></div>`);
 }
@@ -550,7 +622,7 @@ function viewBoard(params){
   const teams=[...new Set(S.board.map(r=>r.p.team))].sort();
   const sel=(id,opts,v)=>`<select id="${id}">${opts.map(([k,l])=>`<option value="${k}" ${String(v)===String(k)?'selected':''}>${l}</option>`).join('')}</select>`;
   return `<h1>Props Board</h1><p class="sub">${S.board.length} props on this week's slate${S.hasBook?'':' (model lines)'}.</p>
-  <button class="btn ftoggle" onclick="document.querySelector('.filters').classList.toggle('open')">⚙ Filters & sort</button>
+  <button class="btn ftoggle" onclick="document.querySelector('.filters').classList.toggle('open')">⚙ Filters</button>
   <div class="filters">
     <input id="bq" type="search" placeholder="Filter player" value="${esc(BS.q)}" style="width:150px">
     ${sel('bm',[['all','All markets'],...BOARD_MK.map(m=>[m,MK[m].label])],BS.m)}
@@ -561,10 +633,9 @@ function viewBoard(params){
     ${sel('bwin',[['L3','Hit% L3'],['L5','Hit% L5'],['L10','Hit% L10'],['SZN','Hit% season'],['H2H','Hit% H2H'],['VENUE','Hit% home/away']],BS.win)}
     ${sel('bmin',[[0,'Any hit%'],[.5,'≥50%'],[.6,'≥60%'],[.7,'≥70%'],[.8,'≥80%'],[1,'100%']],BS.min)}
     ${sel('bdvp',[['all','Any matchup'],['soft','Soft D (rank 22-32)'],['mid','Neutral'],['tough','Tough D (1-10)']],BS.dvp)}
-    ${sel('bsort',[['score','Sort: score'],['hit','Sort: hit% (window)'],['edge','Sort: avg vs line'],['dvp','Sort: matchup'],['time','Sort: kickoff']],BS.sort)}
     <label class="row small"><input type="checkbox" id="binj" ${BS.hideInj?'checked':''}> Hide Out/Doubtful</label>
     <label class="row small"><input type="checkbox" id="bbook" ${BS.bookOnly?'checked':''} ${S.hasBook?'':'disabled'}> Book lines only</label>
-  </div>${BS.game!=='all'?splitsCard(S.slate.find(g=>g.id===BS.game)):''}<div id="boardlist"></div>`;
+  </div>${sortBar('bs')}${BS.game!=='all'?splitsCard(S.slate.find(g=>g.id===BS.game)):''}<div id="boardlist"></div>`;
 }
 function renderBoardList(){
   const q=norm(BS.q);
@@ -574,24 +645,25 @@ function renderBoardList(){
     if(BS.team!=='all'&&r.p.team!==BS.team) continue; if(BS.game!=='all'&&r.g.id!==BS.game) continue;
     if(BS.hideInj && r.inj && BAD_STATUS.test(r.inj.status)) continue; if(BS.bookOnly && r.src!=='book') continue;
     if(q && !norm(r.p.name).includes(q)) continue;
-    const side = BS.side==='over'?1:BS.side==='under'?-1:(r.best.a.side);
+    const ln=SORTS[SORT.k].lean;
+    const side = SORTS[SORT.k].side || (BS.side==='over'?1:BS.side==='under'?-1:(ln&&r.under?(leanSide(r.over.a,ln)??r.best.a.side):r.best.a.side));
     if(side<0 && !r.under) continue;
     const a = side>0?r.over.a:r.under.a;
     const h = a[BS.win]?.r ?? -1; if(h < +BS.min) continue;
     if(BS.dvp!=='all'){ const k=a.dvp?.rank; if(!k) continue; const t = side>0?k:33-k; if(BS.dvp==='soft'&&t<22) continue; if(BS.dvp==='tough'&&t>10) continue; if(BS.dvp==='mid'&&(t<11||t>21)) continue; }
     rows.push({r,side,a,sc:score(a).score,h});
   }
-  const edge=x=>x.a.side*((x.a.avgL10??x.a.line)-x.a.line)/Math.max(x.a.line,1);
-  const srt={score:(x,y)=>y.sc-x.sc, hit:(x,y)=>y.h-x.h||y.sc-x.sc, edge:(x,y)=>edge(y)-edge(x), dvp:(x,y)=>((y.a.dvp?.rank||0)*y.side)-((x.a.dvp?.rank||0)*x.side), time:(x,y)=>x.r.g.ko<y.r.g.ko?-1:1}[BS.sort];
-  rows.sort(srt);
+  for(const x of rows) x.row=x.r;
+  sortRows(rows);
   const total=rows.length; rows=rows.slice(0,BN);
-  $('#boardlist').innerHTML = rows.length ? `<p class="small mut">${total} match${total===1?'':'es'}${total>BN?` · showing ${BN}`:''} <button class="btn" id="breset" style="margin-left:6px">Reset filters</button></p><div class="grid g3">${rows.map(x=>propCard(x.r,x.side)).join('')}</div>${total>BN?`<div style="text-align:center;margin-top:14px"><button class="btn" id="bmore">Show more (${total-BN} left)</button></div>`:''}` : `<div class="empty card">No props match these filters. <button class="btn" id="breset">Reset filters</button></div>`;
+  $('#boardlist').innerHTML = rows.length ? `<p class="small mut">${total} match${total===1?'':'es'}${total>BN?` · showing ${BN}`:''} <button class="btn" id="breset" style="margin-left:6px">Reset filters</button></p><div class="grid g3">${rows.map(x=>propCard(x.r,x.side,0,x)).join('')}</div>${total>BN?`<div style="text-align:center;margin-top:14px"><button class="btn" id="bmore">Show more (${total-BN} left)</button></div>`:''}` : `<div class="empty card">No props match these filters. <button class="btn" id="breset">Reset filters</button></div>`;
   const mo=$('#bmore'); if(mo) mo.onclick=()=>{BN+=60; renderBoardList();};
-  $('#breset').onclick=()=>{Object.assign(BS,{m:'all',pos:'all',team:'all',game:'all',side:'best',win:'L10',min:0,dvp:'all',sort:'score',hideInj:true,bookOnly:false,q:''}); LS.set('boardf',BS); route();};
+  $('#breset').onclick=()=>{Object.assign(BS,{m:'all',pos:'all',team:'all',game:'all',side:'best',win:'L10',min:0,dvp:'all',sort:'score',hideInj:true,bookOnly:false,q:''}); LS.set('boardf',BS); SORT={k:'score',dir:-1}; LS.set('sort',SORT); route();};
   bindCommon($('#boardlist'));
 }
 function bindBoard(){
-  const map={bq:'q',bm:'m',bpos:'pos',bgame:'game',bteam:'team',bside:'side',bwin:'win',bmin:'min',bdvp:'dvp',bsort:'sort'};
+  const map={bq:'q',bm:'m',bpos:'pos',bgame:'game',bteam:'team',bside:'side',bwin:'win',bmin:'min',bdvp:'dvp'};
+  const rb=()=>{ $('#bs').outerHTML=sortBar('bs'); bindSortBar('bs', rb); renderBoardList(); }; bindSortBar('bs', rb);
   for(const [id,k] of Object.entries(map)){ const el=$('#'+id); el.oninput=el.onchange=()=>{BS[k]=el.value; LS.set('boardf',BS); renderBoardList();}; }
   $('#binj').onchange=e=>{BS.hideInj=e.target.checked; LS.set('boardf',BS); renderBoardList();};
   $('#bbook').onchange=e=>{BS.bookOnly=e.target.checked; LS.set('boardf',BS); renderBoardList();};
@@ -600,6 +672,7 @@ function bindBoard(){
 
 /* ----- player page ----- */
 const PS = {without:[], win:'20'};
+let BARS = [];
 function viewPlayer(pid, params){
   const p=S.players[pid]; if(!p) return `<div class="empty card">Player not found.</div>`;
   const pos=p.pos==='FB'?'RB':p.pos;
@@ -659,17 +732,43 @@ function renderPlayer(){
   $('#pextra').innerHTML = [gameLog(a,p), kiPanel(pid), matchupPanel(a,p), S.slateTeam[p.team]?`<h2>Game betting splits</h2>${splitsCard(S.slateTeam[p.team].g)||'<div class="card small mut">No splits posted for this game yet.</div>'}`:'', booksPanel(pid,m), teammatePanel(pid), splitsPanel(a,p)].join('');
   bindPlayerExtra();
 }
+/* per-game stat line used in bar-chart popovers (nhl.js overrides statLine) */
+const RECM = new Set(['rec_yds','receptions','targets','rush_rec_yds']);
+function statLine(g, p, m){
+  const pos=p.pos==='FB'?'RB':p.pos, n=x=>x??0;
+  const pass=`${n(g.completions)}/${n(g.attempts)} cmp/att · ${n(g.passing_yards)} yds · ${n(g.passing_tds)} TD · ${n(g.passing_interceptions)} INT`;
+  const rush=`${n(g.carries)} car / ${n(g.rushing_yards)} yds / ${n(g.rushing_tds)} TD`;
+  const rec=`${n(g.targets)} tgt / ${n(g.receptions)} rec / ${n(g.receiving_yards)} yds${g.receiving_tds?` / ${g.receiving_tds} TD`:''}`;
+  if(pos==='QB') return [['Passing',pass],['Rushing',rush]];
+  if(pos==='RB') return RECM.has(m) ? [['Receiving',rec],['Rushing',rush]] : [['Rushing',rush],['Receiving',rec]];
+  return [['Receiving',rec], ...(g.carries?[['Rushing',rush]]:[])];
+}
+function gameResult(g){ const gm=S.gamesById[g.game]; if(!gm||gm.hs==null) return '';
+  const my=g.team===gm.home?gm.hs:gm.as, th=g.team===gm.home?gm.as:gm.hs; return `${my>th?'W':my<th?'L':'T'} ${my}-${th}`; }
+function barDetail(g, p, m, line, side){
+  const f=MK[m].f, v=f(g), gm=S.gamesById[g.game], d=g.date||gm?.date;
+  const dt = d ? new Date(d+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'}) : '';
+  const wk = S.SPORT==='nhl' ? (gm?.type==='POST'?'Playoffs':'') : `Week ${g.week}${gm?.type&&gm.type!=='REG'?' ('+gm.type+')':''} · ${g.season}`;
+  const sn = S.snaps?.[g.pid||PS.pid]?.[g.game];
+  const res = side>0?v>line:v<line, push=v===line;
+  return `<b>${esc(dt)}</b><span class="mut">${[wk, `${g.home===1?'vs':'@'} ${g.opp} (${g.home===1?'home':'away'})`].filter(Boolean).join(' · ')}</span>`
+   + `<span>Final: <b>${gameResult(g)||'–'}</b>${g.team!==p.team?` (with ${g.team})`:''}</span>`
+   + (S.SPORT==='nfl' ? `<span>Snap %: <b>${sn!=null?Math.round(sn*100)+'%':'–'}</b></span>` : '')
+   + statLine(g,p,m).map(([k,t])=>`<span><em>${k}:</em> ${t}</span>`).join('')
+   + `<span class="${push?'':res?'hitc':'missc'}">${MK[m].label} <b>${v}</b> vs ${line} → ${push?'push':res?'✓ hit':'✗ miss'} (${side>0?'Over':'Under'})</span>`;
+}
 function barChart(games, f, line){
   if(!games.length) return `<div class="empty">No games.</div>`;
   const vals=games.map(f), max=Math.max(line*1.3, ...vals, 1);
   const W=760,H=220,pad=28,bw=(W-pad*2)/games.length;
   const y=v=>H-pad-(v/max)*(H-pad*2);
   const bars=games.map((g,i)=>{const v=vals[i], hit=PS.side>0?v>line:v<line, x=pad+i*bw+bw*.12, w=bw*.76, yy=y(v);
-    return `<g><rect x="${x}" y="${yy}" width="${w}" height="${Math.max(H-pad-yy,1)}" rx="3" fill="${v===line?'#64748b':hit?'#22c55e':'#ef4444'}"><title>${g.season} W${g.week} ${g.home===1?'vs':'@'} ${g.opp}: ${v}</title></rect>
+    return `<g class="bar" data-bar="${i}" tabindex="0" role="button" aria-label="Game details ${g.home===1?'vs':'at'} ${g.opp}: ${v}"><rect class="hitbox" x="${pad+i*bw}" y="0" width="${bw}" height="${H+8}" fill="transparent"/><rect x="${x}" y="${yy}" width="${w}" height="${Math.max(H-pad-yy,1)}" rx="3" fill="${v===line?'#64748b':hit?'#22c55e':'#ef4444'}"></rect>
       <text x="${x+w/2}" y="${yy-4}" fill="#e6edf5" font-size="11" text-anchor="middle" font-weight="700">${v}</text>
       <text x="${x+w/2}" y="${H-pad+13}" fill="#8a9bb0" font-size="9.5" text-anchor="middle">${g.home===1?'':'@'}${g.opp}</text>
       <text x="${x+w/2}" y="${H-pad+24}" fill="#5b6b7f" font-size="8.5" text-anchor="middle">W${g.week}${g.season!==S.stats.season?"'"+String(g.season).slice(2):''}</text></g>`;}).join('');
-  return `<svg class="chart" viewBox="0 0 ${W} ${H+8}" role="img" aria-label="Recent games chart">${bars}
+  BARS = games.map(g=>barDetail(g, S.players[PS.pid], PS.m, line, PS.side));
+  return `<svg class="chart" viewBox="0 0 ${W} ${H+8}" role="img" aria-label="Recent games chart (hover or tap a bar for game details)">${bars}
     <line x1="${pad}" x2="${W-pad}" y1="${y(line)}" y2="${y(line)}" stroke="#f59e0b" stroke-dasharray="6 4" stroke-width="2"/>
     <rect x="0" y="${y(line)-9}" width="${pad+8}" height="18" rx="4" fill="#f59e0b"/><text x="${(pad+8)/2}" y="${y(line)+4}" fill="#0b0f14" font-size="11" text-anchor="middle" font-weight="900">${line}</text></svg>`;
 }
@@ -1009,6 +1108,23 @@ document.addEventListener('DOMContentLoaded', async()=>{
   document.addEventListener('click',e=>{ const w=e.target.closest?.('.warn'); if(w){ e.preventDefault(); e.stopPropagation(); (cur===w && !matchMedia('(hover:hover)').matches)?hide():show(w); } else hide(); }, true);
   document.addEventListener('keydown',e=>{ if(e.key==='Escape') hide(); if(e.key==='Enter' && document.activeElement?.classList.contains('warn')) show(document.activeElement); });
   addEventListener('scroll',hide,{passive:true}); addEventListener('hashchange',hide);
+})();
+
+/* bar-chart popover: hover (desktop) or tap (mobile) a bar for that game's details */
+(function(){
+  let tip=null, cur=null; const hov=()=>matchMedia('(hover:hover)').matches;
+  const hide=()=>{ if(tip){tip.remove(); tip=null;} if(cur){cur.classList.remove('on'); cur=null;} };
+  const show=el=>{ if(cur===el) return; hide(); const h=BARS[+el.dataset.bar]; if(!h) return;
+    tip=document.createElement('div'); tip.id='bartip'; tip.innerHTML=h; document.body.appendChild(tip); cur=el; el.classList.add('on');
+    const r=el.querySelector('rect:not(.hitbox)').getBoundingClientRect(), w=tip.offsetWidth, hh=tip.offsetHeight;
+    let x=Math.min(Math.max(8,r.left+r.width/2-w/2), innerWidth-w-8), y=r.top-hh-8; if(y<8) y=Math.min(innerHeight-hh-8, r.bottom+8);
+    tip.style.left=x+'px'; tip.style.top=y+'px'; };
+  document.addEventListener('mouseover',e=>{ if(!hov()) return; const b=e.target.closest?.('.bar[data-bar]'); if(b) show(b); else if(cur && !e.target.closest?.('#bartip')) hide(); });
+  document.addEventListener('click',e=>{ const b=e.target.closest?.('.bar[data-bar]'); if(b){ e.preventDefault(); (cur===b && !hov())?hide():show(b); } else if(!e.target.closest?.('#bartip')) hide(); });
+  let pd=0; document.addEventListener('pointerdown',()=>{pd=Date.now();},true);
+  document.addEventListener('focusin',e=>{ if(Date.now()-pd<800) return; const b=e.target.closest?.('.bar[data-bar]'); if(b) show(b); }); // keyboard focus only
+  document.addEventListener('keydown',e=>{ if(e.key==='Escape') hide(); });
+  addEventListener('scroll',()=>{ if(hov()) hide(); },{passive:true}); addEventListener('hashchange',hide);
 })();
 
 /* tap/click anywhere on a player card or row -> his player page (game log); buttons, links, inputs and ⚠️ keep their own action */

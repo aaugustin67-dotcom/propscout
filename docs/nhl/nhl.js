@@ -174,3 +174,11 @@ S.matchRest = (a,p) => {
   if(opp){ adj+=.06; t.push(`${st.opp} on a back-to-back`); }
   return {adj, txt:t.join(', ')};
 };
+
+/* bar-chart popover stat lines */
+statLine = (g, p, m) => {
+  const n=x=>x??0, mmss=t=>t==null?'–':Math.floor(t)+':'+String(Math.round((t%1)*60)).padStart(2,'0');
+  if(p.pos==='G') return [['Goalie', `${n(g.saves)} SV / ${n(g.sa)} SA · ${n(g.ga)} GA · ${g.sa?(g.saves/g.sa).toFixed(3).slice(1):'–'} SV% · ${mmss(g.toi)} TOI${g.start?' · started':''}${g.win?' · W':''}`]];
+  return [['Skater', `${n(g.sog)} SOG · ${n(g.goals)} G · ${n(g.assists)} A · ${n(g.points)} P · ${mmss(g.toi)} TOI`],
+          ['Also', `${n(g.ppg)} PPG · ${n(g.ppp)} PPP · ${n(g.blk)} BLK · ${n(g.hits)} HIT · ${n(g.pim)} PIM`]];
+};

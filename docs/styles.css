@@ -157,3 +157,22 @@ tr.golink:hover td{background:rgba(255,255,255,.04)}
 .sport.seg{margin:0 6px;flex:none}
 .sport.seg a{padding:4px 10px;font-weight:800;font-size:12px;color:var(--mut,#8a9bb0);text-decoration:none;display:inline-block}
 .sport.seg a.on{background:var(--green,#22c55e);color:#0b0f14}
+/* sort bar + sorted metric */
+.sortbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 12px;padding:8px 10px;background:var(--card);border:1px solid var(--line);border-radius:10px}
+.sortbar label{font-weight:700;font-size:13px}
+.sortbar select{background:var(--bg,#0b0f14);color:inherit;border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:14px}
+.sortbar .btn{white-space:nowrap}
+.pjhelp summary{cursor:pointer;font-size:13px;color:var(--green)}
+.pjhelp[open]{flex-basis:100%}
+.pjhelp p{margin:6px 0 0}
+.pick .metric{display:flex;align-items:baseline;gap:8px;margin:-2px 0 8px;padding:6px 10px;border-radius:8px;background:#22c55e1a;border:1px solid #22c55e55}
+.pick .metric b{font-size:22px;font-weight:900;color:var(--green)}
+.pick .metric span{font-size:12px;color:var(--mut,#9aa4b2)}
+@media (max-width:700px){ .sortbar select{flex:1 1 100%;min-width:0} .sortbar .btn{flex:1 1 auto} }
+#bartip{position:fixed;z-index:1000;max-width:320px;background:var(--card2);border:1px solid var(--green);border-radius:10px;padding:8px 10px;box-shadow:0 10px 30px #000a;font-size:12.5px;line-height:1.45;pointer-events:none}
+#bartip>b{display:block;font-size:13.5px}
+#bartip span{display:block;padding:1px 0}
+#bartip em{color:var(--mut);font-style:normal}
+#bartip .hitc{color:var(--green)} #bartip .missc{color:var(--red)}
+.chart .bar{cursor:pointer;outline:none}
+.chart .bar.on rect:not(.hitbox),.chart .bar:focus rect:not(.hitbox){stroke:#fff;stroke-width:2}
