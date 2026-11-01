@@ -81,14 +81,15 @@ function injuryOf(p){ const i=S.injByName[norm(p.name)+'|'+p.team]; return i && 
 
 /* ---------- defense vs position ---------- */
 function buildDvP(){
-  const season = S.stats.season, agg = {}; // team -> pos -> {games:Set, sums}
+  const season = S.stats.season, agg = {}, off = {}; // team -> pos -> {games:Set, sums}
   for(const [pid, rows] of Object.entries(S.logs)){
     const p = S.players[pid]; if(!p) continue;
     for(const g of rows){ if(g.season!==season) continue;
       const pos = p.pos==='FB'?'RB':p.pos;
       const a = ((agg[g.opp] ??= {})[pos] ??= {games:new Set(), s:{}});
+      const o = ((off[g.team] ??= {})[pos] ??= {s:{}});
       a.games.add(g.game);
-      for(const m of Object.keys(MK)){ a.s[m]=(a.s[m]||0)+MK[m].f(g); }
+      for(const m of Object.keys(MK)){ const v=MK[m].f(g); a.s[m]=(a.s[m]||0)+v; o.s[m]=(o.s[m]||0)+v; }
     }
   }
   // games a defense played this season (from schedule), so zero-production games still count
@@ -103,7 +104,16 @@ function buildDvP(){
       rows.forEach((r,i)=>{ (out[pos][r.t] ??= {gp:r.n})[m] = {v:r1(r.v), rank:i+1}; });
     }
   }
-  S.dvp = out; S.dvpTeams = Object.keys(dGames).sort();
+  const outO = {};
+  for(const pos of ['QB','RB','WR','TE']){
+    outO[pos] = {};
+    for(const m of Object.keys(MK)){
+      const rows = Object.keys(dGames).map(t => { const a=off[t]?.[pos]; const n=dGames[t].size||1; return {t, v:a?(a.s[m]||0)/n:0, n}; });
+      rows.sort((x,y)=>y.v-x.v); // rank 1 = most produced
+      rows.forEach((r,i)=>{ (outO[pos][r.t] ??= {gp:r.n})[m] = {v:r1(r.v), rank:i+1}; });
+    }
+  }
+  S.dvp = out; S.off = outO; S.dvpTeams = Object.keys(dGames).sort();
 }
 const dvpOf = (team, m, pos) => S.dvp[dvpPos(m,pos)]?.[team]?.[m] || null;
 
@@ -305,7 +315,7 @@ function banner(){
   const el=$('#banner'), st=S.status||{}; let h='';
   const age = st.updated ? (Date.now()-new Date(st.updated))/3600000 : 99;
   if(age>14) h+=`<div class="banner err">Data is ${Math.round(age)}h old — the scheduled refresh may be failing. See the Data page.</div>`;
-  if(!S.hasBook) h+=`<div class="banner">No sportsbook lines loaded yet${st.odds?.has_key?' (odds fetch for upcoming games happens ~30h before kickoff)':' — add the free <b>ODDS_API_KEY</b> secret to load real lines'}. Until then, lines are <b>model lines</b> (median of last 10 games), so hit rates near 50% are expected; matchup and trend drive the ranking.</div>`;
+  if(!S.hasBook && !sessionStorage.ps_nob) h+=`<div class="banner">No sportsbook lines loaded yet${st.odds?.has_key?' (odds fetch for upcoming games happens ~30h before kickoff)':' — add the free <b>ODDS_API_KEY</b> secret to load real lines'}. Until then, props use <b>model lines</b> (the .5 line that splits the last 10 games ~50/50), so L10 hit rates near 50% are expected and matchup, trend and season form drive the ranking. <button class="btn" style="margin-left:6px" onclick="this.parentNode.remove();sessionStorage.ps_nob=1">Dismiss</button></div>`;
   el.innerHTML=h;
 }
 function viewHome(){
@@ -323,14 +333,32 @@ function viewHome(){
   }
   pool.sort((x,y)=>y.sc-x.sc);
   // diversify: max 2 props per player
-  const per={}, top=[]; for(const x of pool){ per[x.row.pid]=(per[x.row.pid]||0)+1; if(per[x.row.pid]<=2) top.push(x); if(top.length>=12) break; }
+  const f=HS.f, filt=pool.filter(x=> f==='all' || (f==='over'&&x.side>0&&x.row.m!=='anytime_td') || (f==='under'&&x.side<0) || x.row.m===f);
+  // diversify: max 2 props per player, max 4 anytime TDs in the mixed view, book lines first when available
+  if(S.hasBook) filt.sort((x,y)=>(y.row.src==='book')-(x.row.src==='book') || y.sc-x.sc);
+  const per={}, perM={}, top=[]; for(const x of filt){ if((per[x.row.pid]||0)>=2) continue; if(f==='all'&&x.row.m==='anytime_td'&&(perM.atd||0)>=4) continue;
+    per[x.row.pid]=(per[x.row.pid]||0)+1; if(x.row.m==='anytime_td') perM.atd=(perM.atd||0)+1; top.push(x); if(top.length>=HS.n) break; }
   const slateTxt = S.slate.length ? `Week ${S.slate[0].week} · ${S.slate.length} games · next kickoff ${fmtTime(S.slate.find(g=>new Date(g.ko)>now)?.ko)}` : 'No upcoming games found';
   return `<h1>Today's Top Picks</h1>
   <p class="sub">${slateTxt}. Ranked by the PropScout score — every input is shown so you can judge it yourself.</p>
   <details class="card small" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700">How the score works</summary>
    <p class="mut">Score (0–100) = 25% last-10 hit rate + 20% last-5 + 15% season + 10% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 15% cushion (last-10 average vs the line) + 15% matchup (how much this defense allows to the position, ranked 1–32 from this season's games). Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
+  ${slateStrip()}
+  <div class="tabs" id="htabs">${[['all','All'],['over','Overs'],['under','Unders'],...BOARD_MK.map(m=>[m,MK[m].label])].map(([k,l])=>`<button data-h="${k}" class="${HS.f===k?'on':''}">${l}</button>`).join('')}</div>
   ${top.length?`<div class="grid g2">${top.map((x,i)=>propWithWhy(x,i+1)).join('')}</div>`:`<div class="empty card">No picks available — the slate may be finished. Check back after the next data refresh.</div>`}
+  ${top.length>=HS.n?`<div style="text-align:center;margin-top:14px"><button class="btn" id="hmore">Show more picks</button></div>`:''}
   <p class="small mut" style="margin-top:14px">See every prop on the <a href="#/board" style="color:var(--green)">Board</a>.</p>`;
+}
+const HS={f:'all',n:12};
+function slateStrip(){
+  const now=Date.now();
+  return `<div class="slate">${S.slate.map(g=>{const live=new Date(g.ko).getTime()<now; const fav=g.spread==null?'':g.spread>0?`${g.home} -${g.spread}`:g.spread<0?`${g.away} ${g.spread}`:'PK';
+    return `<a class="game ${live?'past':''}" href="#/board?game=${g.id}"><div class="row"><b>${g.away}</b><span class="mut">@</span><b>${g.home}</b></div><div class="small mut">${live?'Started':fmtTime(g.ko)}</div><div class="small">${fav}${g.total?` · O/U ${g.total}`:''}</div></a>`;}).join('')}</div>`;
+}
+function bindHome(){
+  bindCommon($('#app'));
+  $$('#htabs button').forEach(b=>b.onclick=()=>{HS.f=b.dataset.h; HS.n=12; route();});
+  const m=$('#hmore'); if(m) m.onclick=()=>{HS.n+=12; const y=scrollY; route(); scrollTo(0,y);};
 }
 function propWithWhy(x, rank){
   const card = propCard(x.row, x.side, rank);
@@ -338,10 +366,14 @@ function propWithWhy(x, rank){
   return card.replace(/<\/div>\s*$/, `<ul class="why">${why}</ul></div>`);
 }
 const BS = LS.get('boardf', {m:'all',pos:'all',team:'all',game:'all',side:'best',win:'L10',min:0,dvp:'all',sort:'score',hideInj:true,bookOnly:false,q:''});
-function viewBoard(){
+let BN=60;
+function viewBoard(params){
+  if(params?.get('game')){ BS.game=params.get('game'); BS.team='all'; }
+  BN=60;
   const teams=[...new Set(S.board.map(r=>r.p.team))].sort();
   const sel=(id,opts,v)=>`<select id="${id}">${opts.map(([k,l])=>`<option value="${k}" ${String(v)===String(k)?'selected':''}>${l}</option>`).join('')}</select>`;
   return `<h1>Props Board</h1><p class="sub">${S.board.length} props on this week's slate${S.hasBook?'':' (model lines)'}.</p>
+  <button class="btn ftoggle" onclick="document.querySelector('.filters').classList.toggle('open')">⚙ Filters & sort</button>
   <div class="filters">
     <input id="bq" type="search" placeholder="Filter player" value="${esc(BS.q)}" style="width:150px">
     ${sel('bm',[['all','All markets'],...BOARD_MK.map(m=>[m,MK[m].label])],BS.m)}
@@ -375,8 +407,10 @@ function renderBoardList(){
   const edge=x=>x.a.side*((x.a.avgL10??x.a.line)-x.a.line)/Math.max(x.a.line,1);
   const srt={score:(x,y)=>y.sc-x.sc, hit:(x,y)=>y.h-x.h||y.sc-x.sc, edge:(x,y)=>edge(y)-edge(x), dvp:(x,y)=>((y.a.dvp?.rank||0)*y.side)-((x.a.dvp?.rank||0)*x.side), time:(x,y)=>x.r.g.ko<y.r.g.ko?-1:1}[BS.sort];
   rows.sort(srt);
-  const total=rows.length; rows=rows.slice(0,150);
-  $('#boardlist').innerHTML = rows.length ? `<p class="small mut">${total} match${total>150?' (showing first 150)':''}</p><div class="grid g3">${rows.map(x=>propCard(x.r,x.side)).join('')}</div>` : `<div class="empty card">No props match these filters.</div>`;
+  const total=rows.length; rows=rows.slice(0,BN);
+  $('#boardlist').innerHTML = rows.length ? `<p class="small mut">${total} match${total===1?'':'es'}${total>BN?` · showing ${BN}`:''} <button class="btn" id="breset" style="margin-left:6px">Reset filters</button></p><div class="grid g3">${rows.map(x=>propCard(x.r,x.side)).join('')}</div>${total>BN?`<div style="text-align:center;margin-top:14px"><button class="btn" id="bmore">Show more (${total-BN} left)</button></div>`:''}` : `<div class="empty card">No props match these filters. <button class="btn" id="breset">Reset filters</button></div>`;
+  const mo=$('#bmore'); if(mo) mo.onclick=()=>{BN+=60; renderBoardList();};
+  $('#breset').onclick=()=>{Object.assign(BS,{m:'all',pos:'all',team:'all',game:'all',side:'best',win:'L10',min:0,dvp:'all',sort:'score',hideInj:true,bookOnly:false,q:''}); LS.set('boardf',BS); route();};
   bindCommon($('#boardlist'));
 }
 function bindBoard(){
@@ -388,7 +422,7 @@ function bindBoard(){
 }
 
 /* ----- player page ----- */
-const PS = {without:[]};
+const PS = {without:[], win:'20'};
 function viewPlayer(pid, params){
   const p=S.players[pid]; if(!p) return `<div class="empty card">Player not found.</div>`;
   const pos=p.pos==='FB'?'RB':p.pos;
@@ -420,7 +454,8 @@ function renderPlayer(){
   const {pid,m}=PS, p=S.players[pid], M=MK[m];
   const a=analyze(pid,m,PS.line,PS.side,{without:PS.without});
   const sc=score(a);
-  const games=a.games.slice(-20);
+  const season=S.stats.season;
+  const games = PS.win==='SZN' ? a.games.filter(g=>g.season===season) : PS.win==='H2H' ? a.games.filter(g=>g.opp===a.opp) : a.games.slice(-(+PS.win||20));
   $('#pfav').classList.toggle('on',isFav(pid,m,PS.side));
   // chart
   const chart = barChart(games, M.f, PS.line);
@@ -435,7 +470,8 @@ function renderPlayer(){
      <div><span>Streak</span><b>${a.streak}</b></div>
      <div><span>Score</span><b>${sc.score}</b></div>
    </div>
-   <h2>Last ${games.length} games vs ${PS.line}</h2>${chart}
+   <div class="row" style="flex-wrap:wrap"><h2 class="sp">${PS.win==='SZN'?season+' season':PS.win==='H2H'?'vs '+(a.opp||'opponent'):'Last '+games.length+' games'} vs ${PS.line}</h2>
+   <div class="seg" id="pwin">${[['5','L5'],['10','L10'],['20','L20'],['SZN','Season'],['H2H','H2H']].map(([k,l])=>`<button data-w="${k}" class="${String(PS.win)===k?'on':''}">${l}</button>`).join('')}</div></div>${chart}
    <div class="legend"><span><b style="color:var(--green)">■</b> ${PS.side>0?'over':'under'} hit</span><span><b style="color:var(--red)">■</b> miss</span><span>- - line</span></div>`;
   // extra panels
   $('#pextra').innerHTML = [matchupPanel(a,p), booksPanel(pid,m), teammatePanel(pid), splitsPanel(a,p), gameLog(a,p)].join('');
@@ -532,27 +568,30 @@ function bindPlayer(){
   renderPlayer();
 }
 function bindPlayerExtra(){
+  $$('#pwin button').forEach(b=>b.onclick=()=>{PS.win=b.dataset.w; renderPlayer();});
   $$('[data-without]').forEach(b=>b.onclick=()=>{const t=b.dataset.without; PS.without=PS.without.includes(t)?PS.without.filter(x=>x!==t):[...PS.without,t]; renderPlayer();});
 }
 
 /* ----- defense ----- */
-const DS = {pos:'WR', sort:'rec_yds', dir:-1};
+const DS = {pos:'WR', sort:'rec_yds', dir:-1, mode:'def'};
 function viewDefense(){
-  return `<h1>Defense vs Position</h1><p class="sub">${S.stats.season} per-game production allowed to each position. Rank 1 = toughest, 32 = softest (allows the most).</p>
+  return `<h1>${DS.mode==='def'?'Defense vs Position':'Team Offense by Position'}</h1><p class="sub">${DS.mode==='def'?`${S.stats.season} per-game production allowed to each position. Rank 1 = toughest, 32 = softest (allows the most).`:`${S.stats.season} per-game production by each team's players at a position. Rank 1 = most productive.`}</p>
+  <div class="seg" id="dmode"><button data-d="def" class="${DS.mode==='def'?'on':''}">Defense allowed</button><button data-d="off" class="${DS.mode==='off'?'on':''}">Offense produced</button></div>
   <div class="tabs" id="dpos">${['QB','RB','WR','TE'].map(p=>`<button data-p="${p}" class="${DS.pos===p?'on':''}">${p}</button>`).join('')}</div><div id="dtable"></div>`;
 }
 function renderDefense(){
   const pos=DS.pos, ms=Object.keys(MK).filter(m=>MK[m].pos.includes(pos) && (pos==='QB' || !MK[m].dvp));
   if(!ms.includes(DS.sort)) DS.sort=ms[0];
-  const rows=S.dvpTeams.map(t=>({t,d:S.dvp[pos][t]})).filter(x=>x.d);
+  const src = DS.mode==='def'?S.dvp:S.off;
+  const rows=S.dvpTeams.map(t=>({t,d:src[pos][t]})).filter(x=>x.d);
   rows.sort((a,b)=>DS.dir*((a.d[DS.sort]?.v??0)-(b.d[DS.sort]?.v??0)));
-  const color=r=>{const x=(r-1)/31; const h=Math.round(0+x*130); return `hsl(${h} 70% 45% / .22)`;};
+  const color=r=>{const x=DS.mode==='def'?(r-1)/31:(32-r)/31; const h=Math.round(0+x*130); return `hsl(${h} 70% 45% / .22)`;};
   $('#dtable').innerHTML=`<div class="tbl"><table class="heat"><tr><th>Team</th><th>GP</th>${ms.map(m=>`<th class="sort" data-s="${m}">${MK[m].label}${DS.sort===m?(DS.dir<0?' ▼':' ▲'):''}</th>`).join('')}</tr>
    ${rows.map(x=>`<tr><td><b>${x.t}</b>${S.slateTeam[x.t]?` <span class="mut small">vs ${S.slateTeam[x.t].opp}</span>`:''}</td><td>${x.d.gp}</td>${ms.map(m=>{const c=x.d[m]; return `<td class="v" style="background:${color(c.rank)}" title="Rank ${c.rank}/32">${c.v} <span class="mut small">${c.rank}</span></td>`;}).join('')}</tr>`).join('')}</table></div>
-   <p class="small mut">Small number = rank (32 = allows most). Green = soft matchup for overs, red = tough.</p>`;
+   <p class="small mut">Small number = rank. Green = favorable for overs, red = unfavorable.</p>`;
   $$('#dtable th.sort').forEach(th=>th.onclick=()=>{ if(DS.sort===th.dataset.s) DS.dir*=-1; else {DS.sort=th.dataset.s; DS.dir=-1;} renderDefense(); });
 }
-function bindDefense(){ $$('#dpos button').forEach(b=>b.onclick=()=>{DS.pos=b.dataset.p; $$('#dpos button').forEach(x=>x.classList.toggle('on',x===b)); renderDefense();}); renderDefense(); }
+function bindDefense(){ $$('#dmode button').forEach(b=>b.onclick=()=>{DS.mode=b.dataset.d; route();}); $$('#dpos button').forEach(b=>b.onclick=()=>{DS.pos=b.dataset.p; $$('#dpos button').forEach(x=>x.classList.toggle('on',x===b)); renderDefense();}); renderDefense(); }
 
 /* ----- trending ----- */
 function viewTrending(){
@@ -669,8 +708,8 @@ function route(){
   const r=parts[0]||'home'; const app=$('#app');
   $$('[data-r]').forEach(a=>a.classList.toggle('on',a.dataset.r===r || (r==='player'&&a.dataset.r==='board')));
   try{
-    if(r==='home'){ app.innerHTML=viewHome(); bindCommon(app); }
-    else if(r==='board'){ app.innerHTML=viewBoard(); bindBoard(); }
+    if(r==='home'){ app.innerHTML=viewHome(); bindHome(); }
+    else if(r==='board'){ app.innerHTML=viewBoard(params); bindBoard(); }
     else if(r==='player'){ app.innerHTML=viewPlayer(parts[1],params); if(S.players[parts[1]]) bindPlayer(); }
     else if(r==='defense'){ app.innerHTML=viewDefense(); bindDefense(); }
     else if(r==='trending'){ app.innerHTML=viewTrending(); }
