@@ -281,6 +281,54 @@ def load_odds(upcoming, players_by_norm):
     note("odds", "ok", f"fetched {fetched} events; credits remaining {state.get('remaining')}")
     return props, state
 
+# ---------------- betting splits (DraftKings Network public page, game lines only) ----------------
+DK_ABBR = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "LVR": "LV"}
+def load_splits():
+    """% handle and % bets for moneyline / spread / total from DraftKings' free public splits page.
+    Allowed by robots.txt; one or two page loads per run. Player-prop splits are not published there."""
+    base = "https://dknetwork.draftkings.com/draftkings-sportsbook-betting-splits/?tb_eg=88808&tb_edate=n7days&tb_emt=0"
+    games, seen = [], set()
+    strip = lambda x: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", x)).replace("\u2212", "-").strip()
+    for page in range(1, 5):
+        try:
+            raw, _ = fetch(base + (f"&tb_page={page}" if page > 1 else ""), timeout=30, tries=2)
+        except Exception as e:
+            note("splits", "error", str(e)); break
+        h = raw.decode("utf-8", "ignore")
+        blocks = h.split('class="tb-se ')[1:]
+        new = 0
+        for b in blocks:
+            t = re.search(r"<h5[^>]*>(.*?)</h5>", b, re.S)
+            parts = strip(t.group(1)).split(" @ ") if t else []
+            if len(parts) != 2: continue
+            nick = {v.split()[-1]: k for v, k in ((n, a) for n, a in TEAM_NAMES.items())}
+            away, home = (nick.get(x.split()[-1]) for x in parts)
+            if not away or not home: continue
+            if (away, home) in seen: continue
+            seen.add((away, home)); new += 1
+            when = re.search(r"</h5>\s*<span[^>]*>([^<]+)</span>", b)
+            g = {"away": away, "home": home, "when": when.group(1).strip() if when else None, "markets": {}}
+            for mk in b.split('class="tb-se-head')[1:]:
+                name = strip(re.search(r'<div class="flex-1">(.*?)</div>', mk, re.S).group(1))
+                rows = []
+                for r in mk.split('class="tb-sodd')[1:]:
+                    lab = re.search(r'tb-slipline[^>]*>(.*?)</div>', r, re.S)
+                    odds = re.search(r'tb-odd-s[^>]*>(.*?)</a>', r, re.S)
+                    pcts = re.findall(r'<div class="flex-1">\s*(\d+)%', r)
+                    if not lab or len(pcts) < 2: continue
+                    o = strip(odds.group(1)) if odds else ""
+                    rows.append({"side": strip(lab.group(1)), "odds": int(o) if re.fullmatch(r"[+-]?\d+", o) else None,
+                                 "handle": int(pcts[0]), "bets": int(pcts[1])})
+                if rows: g["markets"][name.lower()] = rows
+            if g["markets"]: games.append(g)
+        if not new or f"tb_page={page + 1}" not in h: break
+        time.sleep(1)
+    if games:
+        note("splits", "ok", f"{len(games)} NFL games (DraftKings handle/bets %)")
+        save("splits.json", {"updated": NOW.isoformat(), "source": "DraftKings Sportsbook public betting splits (dknetwork.draftkings.com)", "games": games})
+    else:
+        note("splits", "skipped", "no splits parsed - keeping previous")
+
 # ---------------- alerts ----------------
 def alert_new_lines(props, prev_count, players):
     """Optional: post to a Discord webhook when new sportsbook lines are loaded."""
@@ -365,6 +413,7 @@ def main():
             by_norm.setdefault(norm(p["name"]), pid)
     prev_count = len(load_json(os.path.join(OUT, "props.json"), {"lines": []}).get("lines", []))
     props, ostate = load_odds(upcoming, by_norm)
+    load_splits()
     alert_new_lines(props, prev_count, players)
 
     save("stats.json", {"season": cur, "cols": ["season", "week", "game", "team", "opp", "home"] + STAT_COLS,

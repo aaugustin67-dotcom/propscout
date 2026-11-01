@@ -65,6 +65,7 @@ async function load(){
     getJSON('stats.json'), getJSON('games.json'), getJSON('injuries.json',{items:[]}),
     getJSON('props.json',{lines:[]}), getJSON('line_history.json',{}), getJSON('status.json',{})]);
   Object.assign(S,{stats,games,inj,props,hist,status});
+  S.splits = await getJSON('splits.json',{games:[]}); S.splitBy={}; for(const g of S.splits.games||[]) S.splitBy[g.away+'@'+g.home] ??= g;
   const cols = stats.cols;
   S.players = stats.players;
   for(const g of games.games) S.gamesById[g.id]=g;
@@ -269,6 +270,17 @@ function reasons(a, p){
 }
 const ordinal = n => { const v=n%100; if(v>=11&&v<=13) return n+'th'; return n+({1:'st',2:'nd',3:'rd'}[n%10]||'th'); };
 
+
+/* ---------- betting splits (DraftKings public page: game lines only) ---------- */
+const splitOf = g => g ? S.splitBy[g.away+'@'+g.home] : null;
+function splitsCard(g, compact){
+  const sp=splitOf(g); if(!sp) return '';
+  const mk=(lab,rows)=>!rows?'':`<div class="spm"><div class="small mut">${lab}</div>${rows.map(r=>{const gap=r.handle-r.bets;
+    return `<div class="spr"><span class="sps">${esc(r.side)}${r.odds!=null?` <span class="mut">${fmtOdds(r.odds)}</span>`:''}</span><span class="spb" title="% of bets"><i style="width:${r.bets}%"></i><em>${r.bets}% bets</em></span><span class="spb h" title="% of money (handle)"><i style="width:${r.handle}%"></i><em>${r.handle}% $</em></span>${gap>=10?'<span class="pill g" title="Money share well above ticket share: bigger bets on this side">$ ≫ bets</span>':''}</div>`;}).join('')}</div>`;
+  return `<div class="card splits${compact?' small':''}"><div class="row"><b>${g.away} @ ${g.home} · Betting splits</b><span class="sp"></span><span class="small mut">DraftKings · ${ago(S.splits.updated)}</span></div>
+   ${mk('Spread',sp.markets.spread)}${mk('Total',sp.markets.total)}${mk('Moneyline',sp.markets.moneyline)}
+   <p class="small mut" style="margin:6px 0 0">% of bets = tickets, % $ = share of money (handle), all DraftKings jurisdictions. Player-prop splits aren't published by any free source, so props show none.</p></div>`;
+}
 /* ---------- board ---------- */
 function volume(pid){
   const season=S.stats.season, rows=(S.logs[pid]||[]).filter(g=>g.season===season);
@@ -403,6 +415,7 @@ function viewHome(){
   <details class="card small" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700">How the score works</summary>
    <p class="mut">Score (0–100) = 25% last-10 hit rate + 20% last-5 + 15% season + 10% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 15% cushion (last-10 average vs the line) + 15% matchup (how much this defense allows to the position, ranked 1–32 from this season's games). Then a small <b>key-injury adjustment</b> (capped ±8): e.g. +3 when a starting WR teammate is out, +4 when the other RB is out, −4 when his QB is out, +2.5 when the opponent's starting CB is out; Questionable counts 40%, and only fresh absences count. It's listed in each pick's reasons, and ⚠️ next to a name shows the key injuries around him. Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
   ${slateStrip()}
+  ${(S.splits.games||[]).length?`<details class="card small" style="margin-bottom:12px"><summary style="cursor:pointer;font-weight:700">📊 Betting splits (% bets / % money) for this week's games</summary><div class="grid g2" style="margin-top:10px">${S.slate.map(g=>splitsCard(g,true)).join('')}</div></details>`:''}
   <div class="tabs" id="htabs">${[['all','All'],['over','Overs'],['under','Unders'],...BOARD_MK.map(m=>[m,MK[m].label])].map(([k,l])=>`<button data-h="${k}" class="${HS.f===k?'on':''}">${l}</button>`).join('')}</div>
   ${top.length?`<div class="grid g2">${top.map((x,i)=>propWithWhy(x,i+1)).join('')}</div>`:`<div class="empty card">No picks available — the slate may be finished. Check back after the next data refresh.</div>`}
   ${top.length>=HS.n?`<div style="text-align:center;margin-top:14px"><button class="btn" id="hmore">Show more picks</button></div>`:''}
@@ -412,7 +425,7 @@ const HS={f:'all',n:12};
 function slateStrip(){
   const now=Date.now();
   return `<div class="slate">${S.slate.map(g=>{const live=new Date(g.ko).getTime()<now; const fav=g.spread==null?'':g.spread>0?`${g.home} -${g.spread}`:g.spread<0?`${g.away} ${g.spread}`:'PK';
-    return `<a class="game ${live?'past':''}" href="#/board?game=${g.id}"><div class="row"><b>${g.away}</b><span class="mut">@</span><b>${g.home}</b></div><div class="small mut">${live?'Started':fmtTime(g.ko)}</div><div class="small">${fav}${g.total?` · O/U ${g.total}`:''}</div></a>`;}).join('')}</div>`;
+    return `<a class="game ${live?'past':''}" href="#/board?game=${g.id}"><div class="row"><b>${g.away}</b><span class="mut">@</span><b>${g.home}</b></div><div class="small mut">${live?'Started':fmtTime(g.ko)}</div><div class="small">${fav}${g.total?` · O/U ${g.total}`:''}</div>${(()=>{const sp=splitOf(g)?.markets?.spread; if(!sp) return ''; const t=[...sp].sort((a,b)=>b.bets-a.bets)[0]; return `<div class="small mut">📊 ${esc(t.side.split(' ')[0])} ${t.bets}% bets · ${t.handle}% $</div>`;})()}</a>`;}).join('')}</div>`;
 }
 function bindHome(){
   bindCommon($('#app'));
@@ -446,7 +459,7 @@ function viewBoard(params){
     ${sel('bsort',[['score','Sort: score'],['hit','Sort: hit% (window)'],['edge','Sort: avg vs line'],['dvp','Sort: matchup'],['time','Sort: kickoff']],BS.sort)}
     <label class="row small"><input type="checkbox" id="binj" ${BS.hideInj?'checked':''}> Hide Out/Doubtful</label>
     <label class="row small"><input type="checkbox" id="bbook" ${BS.bookOnly?'checked':''} ${S.hasBook?'':'disabled'}> Book lines only</label>
-  </div><div id="boardlist"></div>`;
+  </div>${BS.game!=='all'?splitsCard(S.slate.find(g=>g.id===BS.game)):''}<div id="boardlist"></div>`;
 }
 function renderBoardList(){
   const q=norm(BS.q);
@@ -533,7 +546,7 @@ function renderPlayer(){
    <div class="seg" id="pwin">${[['5','L5'],['10','L10'],['20','L20'],['SZN','Season'],['H2H','H2H']].map(([k,l])=>`<button data-w="${k}" class="${String(PS.win)===k?'on':''}">${l}</button>`).join('')}</div></div>${chart}
    <div class="legend"><span><b style="color:var(--green)">■</b> ${PS.side>0?'over':'under'} hit</span><span><b style="color:var(--red)">■</b> miss</span><span>- - line</span></div>`;
   // extra panels
-  $('#pextra').innerHTML = [kiPanel(pid), matchupPanel(a,p), booksPanel(pid,m), teammatePanel(pid), splitsPanel(a,p), gameLog(a,p)].join('');
+  $('#pextra').innerHTML = [kiPanel(pid), matchupPanel(a,p), S.slateTeam[p.team]?`<h2>Game betting splits</h2>${splitsCard(S.slateTeam[p.team].g)||'<div class="card small mut">No splits posted for this game yet.</div>'}`:'', booksPanel(pid,m), teammatePanel(pid), splitsPanel(a,p), gameLog(a,p)].join('');
   bindPlayerExtra();
 }
 function barChart(games, f, line){
@@ -563,14 +576,31 @@ function matchupPanel(a,p){
    </table><p class="small mut">Rank 1 = allows the least (toughest), 32 = allows the most (softest). ${S.stats.season} season, ${d.gp||0} games.</p></div>
    <div class="card"><div class="small mut" style="margin-bottom:4px">${a.opp} injury report</div>${list(oi)}<div class="small mut" style="margin:10px 0 4px">${p.team} injury report</div>${list(ti)}</div></div>`;
 }
+const impP = o => o==null ? null : (o>0 ? 100/(o+100) : -o/(-o+100));
+const fairAm = q => q==null||q<=0||q>=1 ? null : (q>=.5 ? Math.round(-100*q/(1-q)) : Math.round(100*(1-q)/q));
+function noVig(o,u){ const a=impP(o), b=impP(u); if(a==null||b==null) return null; const t=a+b; return {o:a/t, u:b/t, vig:t-1}; }
 function booksPanel(pid,m){
   const b=S.lines[pid+'|'+m];
   const h=S.hist[pid+'|'+m]||S.hist[norm(S.players[pid].name)+'|'+m]||[];
-  let html=`<h2>Line comparison</h2>`;
+  let html=`<h2>Sportsbook odds</h2>`;
   if(!b){ html+=`<div class="card small mut">No sportsbook lines loaded for this prop${S.status?.odds?.has_key?'':' (add ODDS_API_KEY to enable)'}. Using model line ${modelLine(pid,m)} (median of last 10).</div>`; return html; }
-  html+=`<div class="tbl"><table><tr><th>Book</th><th>Line</th><th>Over</th><th>Under</th><th></th></tr>${b.books.map(l=>`<tr><td>${esc(l.book)}</td><td>${l.line}</td>
-   <td style="${b.bestO===l?'color:var(--green);font-weight:800':''}">${fmtOdds(l.over)}</td><td style="${b.bestU===l?'color:var(--green);font-weight:800':''}">${fmtOdds(l.under)}</td>
-   <td>${l.line!==b.line?'<span class="pill a">alt</span>':''}</td></tr>`).join('')}</table></div>`;
+  const yn = m==='anytime_td';
+  // consensus no-vig at the main line (average of each book's de-vigged probability)
+  const nv = b.books.filter(l=>l.line===b.line).map(l=>noVig(l.over,l.under)).filter(Boolean);
+  const cO = nv.length ? avg(nv.map(x=>x.o)) : null;
+  const bestAt = {}; for(const l of b.books){ const k=l.line; bestAt[k] ??= {o:null,u:null};
+    if(l.over!=null && (bestAt[k].o==null || toDec(l.over)>toDec(bestAt[k].o))) bestAt[k].o=l.over;
+    if(l.under!=null && (bestAt[k].u==null || toDec(l.under)>toDec(bestAt[k].u))) bestAt[k].u=l.under; }
+  const lines=[...b.books].sort((x,y)=>(x.line!==b.line)-(y.line!==b.line) || x.line-y.line || x.book.localeCompare(y.book));
+  const ev = (price, q) => price==null||q==null ? '' : (()=>{ const e=q*toDec(price)-1; return `<div class="small ${e>0?'evp':'mut'}">${e>0?'+':''}${(e*100).toFixed(1)}% EV</div>`; })();
+  html+=`<div class="card small" style="margin-bottom:8px">${nv.length?`Consensus no-vig at <b>${b.line}</b> (${nv.length} book${nv.length>1?'s':''}): ${yn?'Yes':'Over'} <b>${pct(cO)}</b> (fair ${fmtOdds(fairAm(cO))})${yn?'':` · Under <b>${pct(1-cO)}</b> (fair ${fmtOdds(fairAm(1-cO))})`}. EV below is each price vs this consensus fair probability.`:`Books only posted one side${yn?' (Yes only, typical for anytime TD)':''}, so no-vig fair odds can't be computed — implied probability shown instead.`}</div>
+  <div class="tbl"><table class="odds"><tr><th>Book</th><th>Line</th><th>${yn?'Yes':'Over'}</th><th>Impl.</th>${yn?'':'<th>Under</th><th>Impl.</th>'}<th class="hide-m">Hold</th><th>Fair ${yn?'Y':'O'}/${yn?'N':'U'}</th></tr>${lines.map(l=>{
+    const v=noVig(l.over,l.under), bo=bestAt[l.line], qO = l.line===b.line? cO : (v?.o??null);
+    const cell=(x,best,q)=>`<td class="${x!=null&&x===best?'best':''}">${fmtOdds(x)}${l.line===b.line&&!yn?ev(x,q):''}</td>`;
+    return `<tr class="${l.line!==b.line?'altl':''}"><td>${esc(l.book)}${l.line!==b.line?' <span class="pill a">alt</span>':''}</td><td>${yn?'Yes':l.line}</td>
+      ${cell(l.over,bo.o,cO)}<td class="mut">${pct(impP(l.over))}</td>${yn?'':`${cell(l.under,bo.u,cO!=null?1-cO:null)}<td class="mut">${pct(impP(l.under))}</td>`}
+      <td class="hide-m mut">${v?(v.vig*100).toFixed(1)+'%':'–'}</td><td>${v?`${fmtOdds(fairAm(v.o))} / ${fmtOdds(fairAm(v.u))}`:'–'}</td></tr>`;}).join('')}</table></div>
+  <p class="small mut">Green = best price at that line. Impl. = implied probability including the book's margin; Hold = the book's margin on this line; Fair = no-vig odds from that book's two prices.</p>`;
   // line movement
   if(h.length>=2){
     const byT={}; h.forEach(([t,bk,l])=>(byT[t]??=[]).push(l));
@@ -686,27 +716,66 @@ function viewFavorites(){
 }
 
 /* ----- slip ----- */
+/* Export: neither PrizePicks nor Dabble offers a public, documented deep link that pre-fills picks.
+   PrizePicks' board accepts projection IDs (as Pick Finder uses), but those IDs come only from PrizePicks'
+   own projections API, which is bot-protected and not licensed for third-party use — so we don't fake it.
+   Instead: open the app/site + copy a clean slip, or use the phone's share sheet. */
+const APPS = {
+  prizepicks:{name:'PrizePicks', url:'https://app.prizepicks.com/', more:'More', less:'Less'},
+  dabble:{name:'Dabble', url:'https://www.dabble.com/', more:'Over', less:'Under'},
+};
+let SMODE = LS.get('smode','book'); // book | prizepicks | dabble
+const PK_STAT = {pass_yds:'Pass Yards', pass_tds:'Pass TDs', completions:'Pass Completions', rush_yds:'Rush Yards', rec_yds:'Receiving Yards',
+  receptions:'Receptions', anytime_td:'Rush+Rec TDs', rush_rec_yds:'Rush+Rec Yds', pass_att:'Pass Attempts', rush_att:'Rush Attempts', targets:'Targets', ints:'INTs Thrown'};
+const legLine = s => SMODE==='book' ? s.line : (s.pk?.[SMODE] ?? s.line);
+function slipText(){
+  const app=APPS[SMODE];
+  if(!app) return SLIP.map(s=>`${S.players[s.pid]?.name} ${s.m==='anytime_td'?'Anytime TD':(s.side>0?'Over ':'Under ')+s.line+' '+MK[s.m].label}`).join('\n');
+  return `${app.name} picks (PropScout)\n` + SLIP.map((s,i)=>{const p=S.players[s.pid]; const st=S.slateTeam[p?.team];
+    return `${i+1}. ${p?.name} (${p?.team}${st?` ${st.home?'vs':'@'} ${st.opp}`:''}) — ${PK_STAT[s.m]||MK[s.m].label} ${s.side>0?app.more:app.less} ${legLine(s)}`;}).join('\n');
+}
 function viewSlip(){
   if(!SLIP.length) return `<h1>Slip</h1><div class="empty card">Your slip is empty. Add props with “+ Slip”.</div>`;
+  const pk = SMODE!=='book', app=APPS[SMODE];
   let dec=1, priced=true, prob=1;
-  const items=SLIP.map((s,i)=>{const p=S.players[s.pid]; if(!p) return ''; const a=analyze(s.pid,s.m,s.line,s.side); const b=S.lines[s.pid+'|'+s.m];
-    const best = b && b.line===s.line ? (s.side>0?b.bestO:b.bestU) : null; const price = best ? (s.side>0?best.over:best.under) : null;
+  const items=SLIP.map((s,i)=>{const p=S.players[s.pid]; if(!p) return ''; const line=legLine(s); const a=analyze(s.pid,s.m,line,s.side); const b=S.lines[s.pid+'|'+s.m];
+    const best = !pk && b && b.line===s.line ? (s.side>0?b.bestO:b.bestU) : null; const price = best ? (s.side>0?best.over:best.under) : null;
     if(price!=null) dec*=toDec(price); else priced=false; prob*= (a.L10?.r ?? .5);
-    return `<tr><td><a href="#/player/${s.pid}?m=${s.m}"><b>${esc(p.name)}</b></a>${warnIcon(s.pid)}<div class="small mut">${p.team} · ${MK[s.m].label}</div></td><td><span class="side ${s.side>0?'o':'u'}">${s.m==='anytime_td'?'YES':s.side>0?'O':'U'} ${s.m==='anytime_td'?'':s.line}</span></td>
-      <td>${price!=null?fmtOdds(price)+' <span class="mut small">'+esc(best.book)+'</span>':'<span class="mut">–</span>'}</td><td>${pct(a.L10?.r)}</td><td><button class="btn" data-rm="${i}">✕</button></td></tr>`;}).join('');
-  const txt = SLIP.map(s=>`${S.players[s.pid]?.name} ${s.m==='anytime_td'?'Anytime TD':(s.side>0?'Over ':'Under ')+s.line+' '+MK[s.m].label}`).join('\n');
-  return `<h1>Slip builder</h1><div class="tbl"><table><tr><th>Player</th><th>Pick</th><th>Best price</th><th>L10 hit</th><th></th></tr>${items}</table></div>
+    const sideLab = s.m==='anytime_td' ? 'YES' : pk ? (s.side>0?app.more:app.less) : (s.side>0?'O':'U');
+    const pick = pk
+      ? `<div class="row" style="gap:4px;flex-wrap:nowrap"><button class="btn sm" data-flip="${i}" title="Switch side"><span class="side ${s.side>0?'o':'u'}">${sideLab}</span></button><input class="pkl" type="number" step="0.5" min="0" data-pk="${i}" value="${line}" aria-label="${esc(app.name)} line"></div>${b&&b.line!==line?`<div class="small mut">book ${b.line}</div>`:''}`
+      : `<span class="side ${s.side>0?'o':'u'}">${sideLab} ${s.m==='anytime_td'?'':s.line}</span>`;
+    return `<tr><td><a href="#/player/${s.pid}?m=${s.m}"><b>${esc(p.name)}</b></a>${warnIcon(s.pid)}<div class="small mut">${p.team} · ${MK[s.m].label}</div></td><td>${pick}</td>
+      ${pk?`<td>${hrMini(a.L5)}</td><td>${hrMini(a.L10)}</td><td class="hide-m">${hrMini(a.SZN)}</td>`:`<td>${price!=null?fmtOdds(price)+' <span class="mut small">'+esc(best.book)+'</span>':'<span class="mut">–</span>'}</td><td>${pct(a.L10?.r)}</td>`}<td><button class="btn" data-rm="${i}">✕</button></td></tr>`;}).join('');
+  const head = pk ? `<th>Player</th><th>${esc(app.name)} pick & line</th><th>L5</th><th>L10</th><th class="hide-m">Season</th><th></th>` : `<th>Player</th><th>Pick</th><th>Best price</th><th>L10 hit</th><th></th>`;
+  return `<h1>Slip builder</h1>
+   <div class="seg" id="smode" style="margin-bottom:10px">${[['book','Sportsbook'],['prizepicks','PrizePicks'],['dabble','Dabble']].map(([k,l])=>`<button data-sm="${k}" class="${SMODE===k?'on':''}">${l}</button>`).join('')}</div>
+   ${pk?`<p class="small mut" style="margin-top:0">${esc(app.name)} posts its own lines, which no free feed provides. Type the ${esc(app.name)} line on each leg (starts at the sportsbook line) and hit rates recalculate. Lines are saved in this browser.</p>`:''}
+   <div class="tbl"><table><tr>${head}</tr>${items}</table></div>
    <div class="kv" style="margin-top:12px"><div><span>Legs</span><b>${SLIP.length}</b></div>
-   <div><span>Parlay odds</span><b>${priced&&SLIP.length>1?fmtOdds(toAm(dec)):'–'}</b></div>
+   ${pk?'':`<div><span>Parlay odds</span><b>${priced&&SLIP.length>1?fmtOdds(toAm(dec)):'–'}</b></div>`}
    <div><span>Naive hit prob (L10)</span><b>${pct(prob)}</b></div>
-   <div><span>Implied prob</span><b>${priced?pct(1/dec):'–'}</b></div></div>
-   <p class="small mut">Parlay odds need a book price on every leg at the slip's line. "Naive" multiplies last-10 hit rates and ignores correlation.</p>
-   <div class="row" style="margin-top:10px"><button class="btn pri" id="copyslip">Copy slip</button><button class="btn" id="clearslip">Clear</button></div>
-   <textarea id="sliptxt" readonly style="position:absolute;left:-9999px">${esc(txt)}</textarea>`;
+   ${pk?'':`<div><span>Implied prob</span><b>${priced?pct(1/dec):'–'}</b></div>`}</div>
+   <p class="small mut">${pk?'"Naive" multiplies last-10 hit rates at your lines and ignores correlation.':'Parlay odds need a book price on every leg at the slip\'s line. "Naive" multiplies last-10 hit rates and ignores correlation.'}</p>
+   <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+     ${pk?`<button class="btn pri" id="openapp">Copy & open ${esc(app.name)}</button>`:''}
+     <button class="btn ${pk?'':'pri'}" id="copyslip">Copy slip</button>
+     ${navigator.share?'<button class="btn" id="shareslip">Share…</button>':''}
+     ${pk?'':`<button class="btn" data-sm2="prizepicks">→ PrizePicks</button><button class="btn" data-sm2="dabble">→ Dabble</button>`}
+     <button class="btn" id="clearslip">Clear</button></div>
+   ${pk?`<p class="small mut">No verified deep link pre-fills ${esc(app.name)} picks from outside the app, so this copies your slip and opens ${esc(app.name)}${SMODE==='prizepicks'?' (the app opens if installed, otherwise the web board)':' (app-only in the US: install it from your app store if the site doesn\'t hand off)'} — add each leg there from the list.</p>`:''}
+   <pre class="card small" id="slipprev" style="white-space:pre-wrap;margin-top:10px">${esc(slipText())}</pre>`;
 }
+const hrMini = x => x ? `<span class="chip ${cls(x.r)}" style="flex-direction:row;gap:4px"><b>${pct(x.r)}</b><span class="small">${x.h}/${x.n}</span></span>` : '–';
+async function copyText(t){ try{ await navigator.clipboard.writeText(t); return true; }catch{ const ta=document.createElement('textarea'); ta.value=t; ta.style.position='fixed'; ta.style.left='-9999px'; document.body.appendChild(ta); ta.select(); const ok=document.execCommand('copy'); ta.remove(); return ok; } }
 function bindSlip(){
   $$('[data-rm]').forEach(b=>b.onclick=()=>{SLIP.splice(+b.dataset.rm,1); LS.set('slip',SLIP); updSlipCount(); route();});
-  const c=$('#copyslip'); if(c) c.onclick=async()=>{const t=$('#sliptxt').value; try{await navigator.clipboard.writeText(t);}catch{ $('#sliptxt').select(); document.execCommand('copy'); } toast('Slip copied');};
+  $$('[data-sm],[data-sm2]').forEach(b=>b.onclick=()=>{SMODE=b.dataset.sm||b.dataset.sm2; LS.set('smode',SMODE); route();});
+  $$('[data-flip]').forEach(b=>b.onclick=()=>{const s=SLIP[+b.dataset.flip]; if(s.m==='anytime_td') return; s.side*=-1; LS.set('slip',SLIP); route();});
+  $$('[data-pk]').forEach(inp=>inp.onchange=()=>{const s=SLIP[+inp.dataset.pk]; const v=Math.max(0,Math.round(+inp.value*2)/2); (s.pk ??= {})[SMODE]=v; LS.set('slip',SLIP); const y=scrollY; route(); scrollTo(0,y);});
+  const c=$('#copyslip'); if(c) c.onclick=async()=>{ toast(await copyText(slipText())?'Slip copied':'Copy failed'); };
+  const o=$('#openapp'); if(o) o.onclick=async()=>{ await copyText(slipText()); toast('Slip copied — opening '+APPS[SMODE].name); setTimeout(()=>window.open(APPS[SMODE].url,'_blank','noopener'),350); };
+  const sh=$('#shareslip'); if(sh) sh.onclick=async()=>{ try{ await navigator.share({title:'PropScout slip', text:slipText()}); }catch(e){} };
   const x=$('#clearslip'); if(x) x.onclick=()=>{SLIP=[]; LS.set('slip',SLIP); updSlipCount(); route();};
 }
 
@@ -738,7 +807,7 @@ function viewData(){
   <h2>Sources</h2><div class="card small">
    <p><b>Player stats</b> — nflverse weekly player stats (free, no key), ${S.stats.season-2}–${S.stats.season}. Updated by nflverse overnight after games.</p>
    <p><b>Schedule & game lines</b> — nflverse games.csv (spread/total used for favorite/underdog split).</p>
-   <p><b>Injuries</b> — ESPN public injuries feed.</p>
+   <p><b>Injuries</b> — ESPN public injuries feed; starters/key players from nflverse snap counts.</p><p><b>Betting splits</b> — DraftKings Sportsbook's free public splits page (dknetwork.draftkings.com): % bets and % handle for spread, total and moneyline. No free source publishes player-prop splits.</p>
    <p><b>Prop lines</b> — The Odds API (free tier: 500 credits/month). Each upcoming game is fetched once ~30h before kickoff for 7 markets (~7 credits/game), which fits the free tier. Without a key the app uses model lines.</p>
    <p><b>Refresh schedule</b> — GitHub Actions at about 7 AM, 1 PM and 6 PM ET daily.</p></div>`;
 }
