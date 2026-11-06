@@ -261,7 +261,7 @@ def load_odds(upcoming, players_by_norm):
         # Dabble only appears in us_dfs, which doubles the credits per event. Pay for the
         # probe, but stop once the region has never returned a bookmaker for us.
         dfs = state.setdefault("dfs", {"tries": 0, "hits": 0})
-        regions = os.environ.get("ODDS_REGIONS", "us,us_dfs")  # us_dfs carries Dabble + DraftKings Pick6 props
+        regions = os.environ.get("ODDS_REGIONS", "us")  # us_dfs carried Dabble; it comes direct now
         if state.get("dfs_ok") is False:
             regions = ",".join(r.strip() for r in regions.split(",") if r.strip() and r.strip() != "us_dfs") or "us"
         url = (f"{base}/events/{ev['id']}/odds?apiKey={key}&regions={regions}&oddsFormat=american"
@@ -562,6 +562,149 @@ def load_odds_dk(upcoming, players_by_norm):
 
 # ---------------- betting splits (DraftKings Network public page, game lines only) ----------------
 DK_ABBR = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "LVR": "LV"}
+# ---------------- Dabble: the app this board is tuned for, straight from its frontend API -------------
+DABBLE_FIXTURES = ("https://api.dabble.com/frontend-api/competitions/"
+                   "7f7c2f8f-ff04-4e5a-a3c8-d503a523d9ad/sport-fixtures")
+DABBLE_UA = BOVADA_UA
+DABBLE_MARKETS = {  # Dabble resultingType -> our key (full-game markets only)
+    "passing-yards": "pass_yds", "passing-touchdowns": "pass_tds",
+    "passing-completions": "completions", "rushing-yards": "rush_yds",
+    "receiving-yards": "rec_yds", "receptions": "receptions",
+    "anytime-touchdown": "anytime_td",
+}
+DABBLE_TAIL = re.compile(r"^(?:\s+(?P<line>\d+(?:\.\d+)?)\s+(?P<side>over|under))?\s*$", re.I)
+
+def dec_to_am(v):
+    """Decimal odds (1.98) -> American (-102): every book is stored the same way."""
+    try:
+        d = float(v)
+    except (TypeError, ValueError):
+        return None
+    if d <= 1.0:
+        return None
+    return int(round((d - 1) * 100)) if d >= 2 else int(round(-100 / (d - 1)))
+
+def dabble_get(url):
+    """Dabble's app API 403s non-browser clients, but the web frontend API answers a
+    normal browser UA. Keep the TLS-impersonation retry for when Cloudflare tightens."""
+    req = urllib.request.Request(url, headers={"User-Agent": DABBLE_UA, "Accept": "application/json",
+                                               "Origin": "https://dabble.com.au",
+                                               "Referer": "https://dabble.com.au/"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429) and has_curl_cffi():
+            from curl_cffi import requests as cr
+            resp = cr.get(url, headers={"User-Agent": DABBLE_UA, "Accept": "application/json"},
+                          impersonate="chrome", timeout=120)
+            resp.raise_for_status()
+            return resp.json()
+        raise
+
+def dabble_lines(payload, upcoming, players_by_norm):
+    """Pure parser: Dabble's sport-fixtures payload -> our prop-line records.
+
+    A market is named "<player> <resultingType>" and its selections are that name plus
+    "<line> over|under" (anytime TD has no line), so selections are matched to markets by
+    longest name prefix. Odds are decimal and are converted to American.
+    """
+    out = []
+    for fx in payload or []:
+        if (fx.get("status") or "").lower() not in ("open", "inplay"):
+            continue
+        parts = (fx.get("name") or "").split(" @ ")
+        if len(parts) != 2:
+            continue
+        away, home = team_abbr(parts[0]), team_abbr(parts[1])
+        if not away or not home:
+            continue
+        gid = nflverse_event(upcoming, fx.get("advertisedStart") or "", home, away)
+        g = next((x for x in upcoming if x["id"] == gid), None) if gid else None
+        if not g:
+            continue
+        base = {"book": "Dabble", "event": g["id"], "commence": g["ko"], "home": g["home"], "away": g["away"]}
+        prices = {pr.get("selectionId"): dec_to_am(pr.get("price")) for pr in fx.get("prices") or []}
+        mkts = {}
+        for m in fx.get("markets") or []:
+            key = DABBLE_MARKETS.get(m.get("resultingType"))
+            name = m.get("name") or ""
+            if not key or not name or m.get("isDisplayed") is False:
+                continue
+            pn = name
+            for suffix in (m.get("resultingType") or "", (m.get("resultingType") or "").replace("-", " ")):
+                if suffix and pn.endswith(suffix):
+                    pn = pn[: -len(suffix)]
+                    break
+            mkts[name] = (key, prop_name(pn))
+        order = sorted(mkts, key=len, reverse=True)
+        sides = {}
+        for sel in fx.get("selections") or []:
+            if sel.get("isScratched"):
+                continue
+            name = sel.get("name") or ""
+            hit = next((mn for mn in order if name.startswith(mn)), None)
+            if not hit:
+                continue
+            m = DABBLE_TAIL.match(name[len(hit):])
+            price = prices.get(sel.get("id"))
+            if not m or price is None:
+                continue
+            key, pn = mkts[hit]
+            line = float(m.group("line")) if m.group("line") else 0.5
+            side = (m.group("side") or "over").lower()
+            sides.setdefault((pn, key), {}).setdefault(line, {})[side] = price
+        for (pn, key), sd in sides.items():
+            pid = players_by_norm.get(norm(pn))
+            if key == "anytime_td":
+                price = sd.get(0.5, {}).get("over")
+                if price is None:
+                    continue
+                out.append(dict(base, player=pn, pid=pid, market=key, line=0.5, over=price, under=None))
+                continue
+            main = bovada_main_line(sd)
+            if not main:
+                continue
+            hp, two = main
+            out.append(dict(base, player=pn, pid=pid, market=key,
+                            line=int(hp) if float(hp).is_integer() else round(hp, 1),
+                            over=two["over"], under=two["under"]))
+    return out
+
+def load_odds_dabble(upcoming, players_by_norm):
+    """Add Dabble's own numbers to the feed - no key, no credits."""
+    props = load_json(os.path.join(OUT, "props.json"), {"updated": None, "lines": []})
+    hist = load_json(os.path.join(OUT, "line_history.json"), {})
+    state = {"has_key": False, "source": "dabble", "remaining": None, "used": None}
+    try:
+        payload = (dabble_get(DABBLE_FIXTURES) or {}).get("data") or []
+    except Exception as e:
+        note("odds_dabble", "error", f"dabble: {str(e)[:160]}")
+        return props, state
+    lines = [l for l in props.get("lines", []) if l.get("book") != "Dabble"]
+    new = dabble_lines(payload, upcoming, players_by_norm)
+    seen, out = set(), []
+    for r in new:  # one line per player + market
+        k = (r["pid"] or norm(r["player"]), r["market"])
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    for r in out:
+        hk = f"{r['pid'] or norm(r['player'])}|{r['market']}"
+        h = hist.setdefault(hk, [])
+        if not h or h[-1][2] != r["line"]:
+            h.append([NOW.strftime("%Y-%m-%dT%H:%MZ"), "Dabble", r["line"]])
+    cutoff = (NOW - timedelta(days=14)).strftime("%Y-%m-%dT%H:%MZ")
+    hist = {k: [p for p in v if p[0] >= cutoff] for k, v in hist.items()}
+    hist = {k: v for k, v in hist.items() if v}
+    props = {"updated": NOW.isoformat() if out else props.get("updated"), "lines": lines + out}
+    save("props.json", props); save("line_history.json", hist)
+    note("odds_dabble", "ok" if out else "skipped",
+         f"Dabble: {len(out)} lines over {len({r['event'] for r in out})} games (free, no key)" if out
+         else "no NFL player props posted yet")
+    return props, state
+
 def load_splits(eg="88808", out="splits.json", names=None, label="NFL"):
     """% handle and % bets for moneyline / spread / total from DraftKings' free public splits page.
     Allowed by robots.txt; one or two page loads per run. Player-prop splits are not published there."""
@@ -738,7 +881,8 @@ def main():
     # free real lines first (Bovada), then DraftKings as a second book; both need no key
     props, ostate = load_odds_free(upcoming, by_norm)
     props, dstate = load_odds_dk(upcoming, by_norm)
-    sources = [x for x in (ostate.get("source"), dstate.get("source")) if x]
+    props, dbstate = load_odds_dabble(upcoming, by_norm)   # your primary app, direct and keyless
+    sources = [x for x in (ostate.get("source"), dstate.get("source"), dbstate.get("source")) if x]
     if os.environ.get("ODDS_API_KEY", "").strip():
         # optional: add FanDuel/BetMGM/BetRivers prices on top of the free books
         props, kstate = load_odds(upcoming, by_norm)

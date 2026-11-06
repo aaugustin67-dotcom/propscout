@@ -7,7 +7,7 @@ Static site on GitHub Pages; data refreshed ~3×/day by GitHub Actions. No serve
 
 ## Features
 - **Top Picks (home)** — today's best props ranked by a transparent 0–100 score, with the reasons listed on each card.
-- **App availability** — every prop shows which apps post it (★ Dabble first, then the other books), the Board has an "Any app" filter, and the player page lists the apps carrying each market.
+- **App availability** — every prop shows which apps post it (★ Dabble first, then Bovada and DraftKings), the Board has an "Any app" filter, and the player page lists the apps carrying each market.
 - **Track record** — every refresh records the Top Picks using the page's own score, then grades them once the game is final: record, hit rate, units, ROI and **closing-line value** (did the line move our way after the pick went up?) on the Track record page.
 - **Props board** — every passing / rushing / receiving / anytime-TD prop on this week's slate. Filter by market, position, game, team, side, hit-rate window & minimum, matchup (soft/neutral/tough D), injuries, book-lines-only. Sort by score, hit rate, cushion, matchup, kickoff.
 - **Player page** — market tabs, editable line + alt-line buttons (everything recomputes), Over/Under toggle, bar chart of last 20 games vs line, hit rates L3/L5/L10/season/H2H/home/away, splits (season, home/away, favorite/underdog, vs tough/soft defenses, vs opponent), full game log, teammate-out filter, matchup panel with both teams' injury reports, sportsbook line comparison & line movement.
@@ -28,18 +28,18 @@ Players listed Out/Doubtful/IR, players who missed their team's last two games, 
 | Injuries | ESPN public injuries feed | No |
 | Player prop lines (default) | [Bovada](https://www.bovada.lv/sports/football/nfl) public NFL prop feed — one JSON request per refresh, no key | No |
 | Second book | DraftKings public sportsbook API (scraped; browser TLS via `curl_cffi`, installed in CI) | No |
-| Dabble lines | via The Odds API `us_dfs` region (`dabble_us_dfs`); Dabble's own API is AU-geo-blocked | Optional – `ODDS_API_KEY` |
+| Dabble lines (your main app) | [Dabble](https://dabble.com.au)'s public sportsbook frontend API — one request covers the whole NFL competition, no key, no credits | No |
 | Our own picks + results | `docs/data/picks.json`, graded from nflverse stats and `line_history.json` | No |
 | Extra books' prop lines (DraftKings, FanDuel, BetMGM…) | [The Odds API](https://the-odds-api.com) free tier, 500 credits/month | Optional – `ODDS_API_KEY` |
 
-Without the odds key the app still shows **real sportsbook lines**: every refresh scrapes Bovada's public NFL prop feed once (no signup, no credits, no rate-limit budget) for passing yards, passing TDs, completions, rushing yards, receiving yards, receptions and anytime TD, keeping each player's least-vig (main) line, plus **DraftKings**' public prop board as a second book so the consensus line and no-vig fair odds have two independent sources (DraftKings needs `pip install curl_cffi`; without it the build quietly falls back to Bovada only). Only when a slate has no props posted yet does it fall back to **model lines** (the .5 line closest to a 50/50 split of the last 10 games).
+Without the odds key the app still shows **real sportsbook lines**: every refresh scrapes Bovada's public NFL prop feed once (no signup, no credits, no rate-limit budget) for passing yards, passing TDs, completions, rushing yards, receiving yards, receptions and anytime TD, keeping each player's least-vig (main) line, plus **DraftKings**' public prop board as a second book so the consensus line and no-vig fair odds have two independent sources (DraftKings needs `pip install curl_cffi`; without it the build quietly falls back to Bovada only). **Dabble** — the app the board is tuned for — comes straight from its own sportsbook frontend API: its mobile API refuses non-browser clients, but one browser-like request returned all 14 games and 622 player props (passing yards/TDs/completions, rushing and receiving yards, receptions, anytime TD), so your primary app's numbers sit in the consensus beside the other two books instead of behind a paid region. Only when a slate has no props posted yet does it fall back to **model lines** (the .5 line closest to a 50/50 split of the last 10 games).
 
 ### Adding more books (optional – The Odds API key)
 1. Sign up for the free Starter plan at https://the-odds-api.com/#get-access — the key is emailed to you.
 2. In this repo: **Settings → Secrets and variables → Actions → New repository secret**, name `ODDS_API_KEY`, paste the key.
 3. **Actions → Refresh data & deploy → Run workflow** (or wait for the next scheduled run).
 
-Budget guard: each game's props (7 markets, ~7 credits) are fetched **once**, ~30 h before kickoff, and fetching stops if fewer than 30 credits remain — about 450 credits/month in season. Tunable via env vars `ODDS_WINDOW_HOURS`, `ODDS_FETCHES_PER_EVENT`, `ODDS_MIN_REMAINING` in the workflow (raise fetches per event only on a paid plan).
+Budget guard: each game's props (7 markets, ~7 credits) are fetched **once**, ~30 h before kickoff, and fetching stops if fewer than 30 credits remain — about 450 credits/month in season. Tunable via env vars `ODDS_WINDOW_HOURS`, `ODDS_FETCHES_PER_EVENT`, `ODDS_MIN_REMAINING` and `ODDS_REGIONS` (default `us`) in the workflow (raise fetches per event only on a paid plan). `us_dfs` is no longer requested: it only existed to reach Dabble through The Odds API and doubles the credits per event.
 
 ## Optional Discord alerts
 Add a repo secret `DISCORD_WEBHOOK_URL` (Discord → channel settings → Integrations → Webhooks) to get a message whenever new sportsbook lines are loaded, and — more usefully — **when a book that normally posts lines returns none**. That check is `book_health()` in `scripts/build_data.py`: every refresh compares each book's line count for the slate against the previous run (both appear in the Data status log), so a broken scraper fails loudly instead of quietly leaving you with fewer books or model lines.
