@@ -25,9 +25,10 @@ Players listed Out/Doubtful/IR, players who missed their team's last two games, 
 | Schedule, spreads/totals | [nflverse/nfldata games.csv](https://github.com/nflverse/nfldata) | No |
 | Injuries | ESPN public injuries feed | No |
 | Player prop lines (default) | [Bovada](https://www.bovada.lv/sports/football/nfl) public NFL prop feed — one JSON request per refresh, no key | No |
+| Second book | DraftKings public sportsbook API (scraped; browser TLS via `curl_cffi`, installed in CI) | No |
 | Extra books' prop lines (DraftKings, FanDuel, BetMGM…) | [The Odds API](https://the-odds-api.com) free tier, 500 credits/month | Optional – `ODDS_API_KEY` |
 
-Without the odds key the app still shows **real sportsbook lines**: every refresh scrapes Bovada's public NFL prop feed once (no signup, no credits, no rate-limit budget) for passing yards, passing TDs, completions, rushing yards, receiving yards, receptions and anytime TD, keeping each player's least-vig (main) line. Only when a slate has no props posted yet does it fall back to **model lines** (the .5 line closest to a 50/50 split of the last 10 games).
+Without the odds key the app still shows **real sportsbook lines**: every refresh scrapes Bovada's public NFL prop feed once (no signup, no credits, no rate-limit budget) for passing yards, passing TDs, completions, rushing yards, receiving yards, receptions and anytime TD, keeping each player's least-vig (main) line, plus **DraftKings**' public prop board as a second book so the consensus line and no-vig fair odds have two independent sources (DraftKings needs `pip install curl_cffi`; without it the build quietly falls back to Bovada only). Only when a slate has no props posted yet does it fall back to **model lines** (the .5 line closest to a 50/50 split of the last 10 games).
 
 ### Adding more books (optional – The Odds API key)
 1. Sign up for the free Starter plan at https://the-odds-api.com/#get-access — the key is emailed to you.

@@ -300,7 +300,7 @@ BOVADA_MARKETS = {  # Bovada market description prefix -> our key
 BOVADA_TD = "Anytime Touchdown Scorer"
 
 def am_price(v):
-    s = str(v if v is not None else "").strip().upper()
+    s = str(v if v is not None else "").strip().upper().replace("\u2212", "-").replace("\u2013", "-")
     if s in ("EVEN", "EV"): return 100
     return int(s) if re.fullmatch(r"[+-]?\d+", s) else None
 
@@ -408,6 +408,118 @@ def load_odds_free(upcoming, players_by_norm):
     save("props.json", props); save("line_history.json", hist)
     note("odds_free", "ok" if out else "skipped",
          f"Bovada: {len(out)} lines over {len(games)} games (free, no key)" if out else "no props posted yet")
+    return props, state
+
+# ---------------- second free book: DraftKings public sportsbook API (scraped) ----------------
+DK_BASE = "https://sportsbook-nash.draftkings.com/api/sportscontent/dkusnj/v1"
+DK_LEAGUE = "88808"
+DK_MARKETS = {  # our market key -> (DraftKings categoryId, subcategoryId) for the real two-way O/U board
+    "pass_yds": (1000, 9524), "pass_tds": (1000, 9525), "completions": (1000, 9522),
+    "rush_yds": (1001, 9514), "rec_yds": (1342, 14114), "receptions": (1342, 14115),
+}
+DK_TD = (1003, 12438)  # Anytime TD Scorer: one price per player, no under side
+DK_SUFFIX = {  # DraftKings market-name suffix -> our key
+    "Passing Yards": "pass_yds", "Passing Touchdowns": "pass_tds", "Completions": "completions",
+    "Rushing Yards": "rush_yds", "Receiving Yards": "rec_yds", "Receptions": "receptions",
+}
+
+def has_curl_cffi():
+    try:
+        import curl_cffi  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+def dk_get(path):
+    """DraftKings sits behind Akamai: plain urllib gets 403, so use curl_cffi's Chrome TLS when installed."""
+    url = DK_BASE + path
+    if has_curl_cffi():
+        from curl_cffi import requests as creq
+        r = creq.get(url, impersonate="chrome", timeout=45, headers={"Accept": "application/json"})
+        if r.status_code != 200: raise RuntimeError(f"HTTP {r.status_code}")
+        return r.json()
+    raw, _ = fetch(url, timeout=60, tries=1)
+    return json.loads(raw)
+
+def dk_event_teams(events):
+    """{'34118128': ('CIN','ATL')} from 'CIN Bengals @ ATL Falcons'."""
+    out = {}
+    for e in events or []:
+        parts = (e.get("name") or "").split(" @ ")
+        if len(parts) != 2: continue
+        a, h = parts[0].split()[0], parts[1].split()[0]
+        out[str(e.get("id"))] = (DK_ABBR.get(a, a), DK_ABBR.get(h, h))
+    return out
+
+def load_odds_dk(upcoming, players_by_norm):
+    """Second keyless book: DraftKings' public NFL prop board (7 markets, one request each)."""
+    props = load_json(os.path.join(OUT, "props.json"), {"updated": None, "lines": []})
+    state = {"has_key": False, "source": None, "remaining": None, "used": None}
+    if not has_curl_cffi():
+        note("odds_dk", "skipped", "curl_cffi not installed - DraftKings needs browser TLS, Bovada lines only")
+        return props, state
+    slate = {(g["away"], g["home"]): g for g in upcoming}
+    lines = [l for l in props.get("lines", []) if l.get("book") != "DraftKings"]
+    new, games = [], set()
+    try:
+        for market, (cid, sid) in list(DK_MARKETS.items()) + [("anytime_td", DK_TD)]:
+            data = dk_get(f"/leagues/{DK_LEAGUE}/categories/{cid}/subcategories/{sid}")
+            teams = dk_event_teams(data.get("events"))
+            by_market = {}
+            for sel in data.get("selections") or []:
+                by_market.setdefault(sel.get("marketId"), []).append(sel)
+            for mk in data.get("markets") or []:
+                ev = teams.get(str(mk.get("eventId")))
+                g = slate.get(ev) if ev else None
+                if not g: continue
+                base = {"book": "DraftKings", "event": g["id"], "commence": g["ko"],
+                        "home": g["home"], "away": g["away"]}
+                sel = by_market.get(mk.get("id")) or []
+                if market == "anytime_td":
+                    for x in sel:
+                        name = (x.get("label") or "").strip()
+                        price = am_price((x.get("displayOdds") or {}).get("american"))
+                        if not name or price is None: continue
+                        new.append(dict(base, player=name, pid=players_by_norm.get(norm(name)),
+                                        market="anytime_td", line=0.5, over=price, under=None))
+                    continue
+                full = re.sub(r"\s+O/U$", "", mk.get("name") or "")
+                pn, key = None, None
+                for suffix, k in DK_SUFFIX.items():
+                    if full.endswith(" " + suffix):
+                        key, pn = k, full[: -len(suffix) - 1].strip()
+                        break
+                if key != market or not pn: continue
+                sides = {}
+                for x in sel:
+                    side = (x.get("label") or "").strip().lower()
+                    if side not in ("over", "under"): continue
+                    try: hp = float(x.get("points"))
+                    except (TypeError, ValueError): continue
+                    price = am_price((x.get("displayOdds") or {}).get("american"))
+                    sides.setdefault(hp, {"over": None, "under": None})[side] = price
+                main = bovada_main_line(sides)
+                if not main: continue
+                hp, sd = main
+                new.append(dict(base, player=pn, pid=players_by_norm.get(norm(pn)), market=market,
+                                line=int(hp) if float(hp).is_integer() else round(hp, 1),
+                                over=sd["over"], under=sd["under"]))
+                games.add(g["id"])
+    except Exception as e:
+        note("odds_dk", "error", f"draftkings: {str(e)[:140]}")
+        return props, state
+    seen, out = set(), []
+    for r in new:  # one line per player+market
+        k = (r["pid"] or norm(r["player"]), r["market"])
+        if k in seen: continue
+        seen.add(k); out.append(r)
+    props = {"updated": NOW.isoformat() if out else props.get("updated"), "lines": lines + out}
+    save("props.json", props)
+    if out:
+        state["source"] = "draftkings"
+        note("odds_dk", "ok", f"DraftKings: {len(out)} lines over {len(games)} games (scraped, no key)")
+    else:
+        note("odds_dk", "skipped", "no DraftKings props matched this slate")
     return props, state
 
 # ---------------- betting splits (DraftKings Network public page, game lines only) ----------------
@@ -554,13 +666,17 @@ def main():
         if p["last"][0] == cur or pid not in by_norm.values():
             by_norm.setdefault(norm(p["name"]), pid)
     prev_count = len(load_json(os.path.join(OUT, "props.json"), {"lines": []}).get("lines", []))
-    # free real lines first: Bovada's public feed needs no key and has no credit budget
+    # free real lines first (Bovada), then DraftKings as a second book; both need no key
     props, ostate = load_odds_free(upcoming, by_norm)
+    props, dstate = load_odds_dk(upcoming, by_norm)
+    sources = [x for x in (ostate.get("source"), dstate.get("source")) if x]
     if os.environ.get("ODDS_API_KEY", "").strip():
-        # optional: add DraftKings/FanDuel/BetMGM prices on top of the free feed
+        # optional: add FanDuel/BetMGM/BetRivers prices on top of the free books
         props, kstate = load_odds(upcoming, by_norm)
         if kstate.get("has_key"):
-            ostate = dict(kstate, source="bovada+" + (kstate.get("source") or "the-odds-api"))
+            ostate = kstate
+            sources.append("the-odds-api")
+    ostate = dict(ostate, source="+".join(sources) if sources else None)
     # grade stored real lines once games are final -> category base rates
     try:
         import grading

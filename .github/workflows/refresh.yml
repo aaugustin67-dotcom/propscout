@@ -29,6 +29,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install odds scraping dependency
+        # DraftKings' public API is behind Akamai; curl_cffi gives it a browser TLS fingerprint.
+        # If this step is removed the build still works, with Bovada lines only.
+        run: python -m pip install --quiet --disable-pip-version-check curl_cffi
       - name: Build data
         env:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
