@@ -6,7 +6,7 @@ Sources (no key needed): nflverse weekly player stats, nflverse schedule, ESPN i
 Optional: The Odds API player props (env ODDS_API_KEY), with a strict budget guard
 so the free tier (500 credits/month) is never exceeded.
 """
-import csv, io, json, os, re, sys, time, urllib.request, urllib.error
+import csv, io, json, os, re, shutil, subprocess, sys, time, urllib.request, urllib.error
 from datetime import datetime, timezone, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -194,6 +194,30 @@ def enrich_injuries(inj, snaps):
     return inj
 
 # ---------------- odds ----------------
+def nflverse_event(upcoming, commence, home, away):
+    """Map a book's own event onto the nflverse game id used everywhere else.
+
+    Without this one game arrives under two ids (The Odds API's opaque id and
+    nflverse's 2026_09_CIN_ATL), which split the consensus panel and let grading
+    archive the same prop twice, inflating the category base rates.
+    """
+    if not home or not away:
+        return None
+    try:
+        ct = datetime.fromisoformat(str(commence).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    for g in upcoming:
+        if g["home"] != home or g["away"] != away or not g.get("ko"):
+            continue
+        try:
+            ko = datetime.fromisoformat(g["ko"])
+        except ValueError:
+            continue
+        if abs((ko - ct).total_seconds()) < 12 * 3600:
+            return g["id"]
+    return None
+
 def load_odds(upcoming, players_by_norm):
     key = os.environ.get("ODDS_API_KEY", "").strip()
     state_path = os.path.join(OUT, "odds_state.json")
@@ -234,7 +258,12 @@ def load_odds(upcoming, players_by_norm):
         if state.get("remaining") is not None and int(state["remaining"]) < min_left:
             note("odds", "budget", f"only {state['remaining']} credits left - skipping")
             break
+        # Dabble only appears in us_dfs, which doubles the credits per event. Pay for the
+        # probe, but stop once the region has never returned a bookmaker for us.
+        dfs = state.setdefault("dfs", {"tries": 0, "hits": 0})
         regions = os.environ.get("ODDS_REGIONS", "us,us_dfs")  # us_dfs carries Dabble + DraftKings Pick6 props
+        if state.get("dfs_ok") is False:
+            regions = ",".join(r.strip() for r in regions.split(",") if r.strip() and r.strip() != "us_dfs") or "us"
         url = (f"{base}/events/{ev['id']}/odds?apiKey={key}&regions={regions}&oddsFormat=american"
                f"&markets={','.join(nfl_markets())}")
         try:
@@ -253,8 +282,16 @@ def load_odds(upcoming, players_by_norm):
             es["empty"] = es.get("empty", 0) + 1
             continue
         es["fetches"] += 1; fetched += 1
+        if any(str(bk.get("key", "")).startswith("dabble") for bk in data.get("bookmakers", [])):
+            dfs["hits"] = dfs.get("hits", 0) + 1; state["dfs_ok"] = True
+        else:
+            dfs["tries"] = dfs.get("tries", 0) + 1
+            if not dfs.get("hits") and dfs["tries"] >= 4 and state.get("dfs_ok") is not False:
+                state["dfs_ok"] = False
+                note("odds", "warn", f"Dabble returned nothing in {dfs['tries']} event fetches - dropping us_dfs to save credits")
         home = TEAM_NAMES.get(data.get("home_team")); away = TEAM_NAMES.get(data.get("away_team"))
-        lines = [l for l in lines if l["event"] != ev["id"]]
+        eid = nflverse_event(upcoming, ev["commence_time"], home, away) or ev["id"]
+        lines = [l for l in lines if l["event"] != eid]
         agg = {}
         for bk in data.get("bookmakers", []):
             for m in bk.get("markets", []):
@@ -265,7 +302,7 @@ def load_odds(upcoming, players_by_norm):
                     k2 = (norm(pn), mk, bk["key"], o.get("point"))
                     rec = agg.setdefault(k2, {"player": pn, "pid": players_by_norm.get(norm(pn)), "market": mk,
                                               "book": bk["title"], "line": o.get("point", 0.5) if o.get("point") is not None else 0.5,
-                                              "over": None, "under": None, "event": ev["id"],
+                                              "over": None, "under": None, "event": eid,
                                               "commence": ev["commence_time"], "home": home, "away": away})
                     side = o.get("name", "").lower()
                     if side in ("over", "yes"): rec["over"] = o.get("price")
@@ -574,6 +611,36 @@ def load_splits(eg="88808", out="splits.json", names=None, label="NFL"):
         note("splits", "skipped", "no splits parsed - keeping previous")
 
 # ---------------- alerts ----------------
+def book_health(props, prev_props, upcoming_ids):
+    """Say so when a book that normally posts lines stops posting them.
+
+    A silent scraper is the expensive failure here: the site keeps working and just
+    shows fewer books (or model lines), which look exactly like real lines.
+    """
+    def counts(lines):
+        c = {}
+        for l in lines:
+            if l.get("event") in upcoming_ids and l.get("book"):
+                c[l["book"]] = c.get(l["book"], 0) + 1
+        return c
+    now_c = counts(props.get("lines", []))
+    prev_c = counts(prev_props.get("lines", []))
+    lost = [b for b, n in prev_c.items() if n >= 40 and now_c.get(b, 0) == 0]
+    if not lost:
+        note("health", "ok", " · ".join(f"{b} {n}" for b, n in sorted(now_c.items())) or "no book lines on the slate")
+        return lost
+    msg = ", ".join(f"{b} (had {prev_c[b]})" for b in lost)
+    note("health", "error", f"no lines from {msg} - the feed may have changed")
+    hook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    if hook:
+        try:
+            body = json.dumps({"content": f"⚠️ PropScout: {msg} returned no prop lines this refresh."}).encode()
+            urllib.request.urlopen(urllib.request.Request(hook, data=body,
+                headers={"Content-Type": "application/json"}), timeout=15).read()
+        except Exception:
+            pass
+    return lost
+
 def alert_new_lines(props, prev_count, players):
     """Optional: post to a Discord webhook when new sportsbook lines are loaded."""
     hook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
@@ -666,7 +733,8 @@ def main():
     for pid, p in players.items():
         if p["last"][0] == cur or pid not in by_norm.values():
             by_norm.setdefault(norm(p["name"]), pid)
-    prev_count = len(load_json(os.path.join(OUT, "props.json"), {"lines": []}).get("lines", []))
+    prev_props = load_json(os.path.join(OUT, "props.json"), {"lines": []})
+    prev_count = len(prev_props.get("lines", []))
     # free real lines first (Bovada), then DraftKings as a second book; both need no key
     props, ostate = load_odds_free(upcoming, by_norm)
     props, dstate = load_odds_dk(upcoming, by_norm)
@@ -678,7 +746,18 @@ def main():
             ostate = kstate
             sources.append("the-odds-api")
     ostate = dict(ostate, source="+".join(sources) if sources else None)
+    book_health(props, prev_props, {g["id"] for g in upcoming})
+    save("stats.json", {"season": cur, "cols": ["season", "week", "game", "team", "opp", "home"] + STAT_COLS,
+                        "players": players, "logs": logs})
+    save("games.json", {"season": cur, "games": list(games.values()), "upcoming": upcoming})
+    save("injuries.json", {"updated": NOW.isoformat(), "items": inj})
+    if not os.path.exists(os.path.join(OUT, "props.json")):
+        save("props.json", {"updated": None, "lines": []})
+    if not os.path.exists(os.path.join(OUT, "line_history.json")):
+        save("line_history.json", {})
+
     # grade stored real lines once games are final -> category base rates
+    picks_summary = {}
     try:
         import grading
         COLIDX = {c: i + 6 for i, c in enumerate(STAT_COLS)}
@@ -697,25 +776,39 @@ def main():
         done, pend = grading.grade(os.path.join(OUT, "line_archive.json"), os.path.join(OUT, "results.json"),
                                    value_of, now=NOW, yes_only=("anytime_td",))
         note("grading", "ok", f"archived {added} new lines; graded {done}; {pend} waiting for final stats")
+        # ---- track record: the site's own Top Picks, scored by docs/app.js ----------
+        import picks as picklog
+        pj = os.path.join(OUT, "picks.json")
+        hist = load_json(os.path.join(OUT, "line_history.json"), {})
+        js_picks = []
+        node = shutil.which("node")
+        if node:
+            r = subprocess.run([node, os.path.join(ROOT, "scripts", "picks.js"), OUT],
+                               capture_output=True, text=True, timeout=300, cwd=ROOT)
+            if r.returncode == 0 and r.stdout.strip():
+                js_picks = json.loads(r.stdout).get("picks", [])
+            else:
+                note("picks", "error", (r.stderr.strip().splitlines() or ["picks.js failed"])[-1][:200])
+        else:
+            note("picks", "skipped", "node not installed - Top Picks not recorded")
+        recorded = picklog.merge(pj, js_picks, NOW) if js_picks else 0
+        graded, picks_summary = picklog.grade(pj, value_of, hist, NOW)
+        note("picks", "ok" if (js_picks or graded) else "skipped",
+             f"recorded {recorded} new, graded {graded}"
+             + (f"; {picks_summary['hits']}-{picks_summary['losses']}, {picks_summary['units']} units, "
+                f"ROI {round((picks_summary.get('roi') or 0) * 100)}%" if picks_summary.get("n") else ""))
     except Exception as e:
         note("grading", "error", str(e))
     load_splits()
     alert_new_lines(props, prev_count, players)
 
-    save("stats.json", {"season": cur, "cols": ["season", "week", "game", "team", "opp", "home"] + STAT_COLS,
-                        "players": players, "logs": logs})
-    save("games.json", {"season": cur, "games": list(games.values()), "upcoming": upcoming})
-    save("injuries.json", {"updated": NOW.isoformat(), "items": inj})
-    if not os.path.exists(os.path.join(OUT, "props.json")):
-        save("props.json", {"updated": None, "lines": []})
-    if not os.path.exists(os.path.join(OUT, "line_history.json")):
-        save("line_history.json", {})
     save("status.json", {"updated": NOW.isoformat(), "season": cur, "log": log, "ok": True,
                          "players": len(players), "rows": sum(len(v) for v in logs.values()),
                          "upcoming": len(upcoming),
                          "odds": {"has_key": ostate.get("has_key", False), "remaining": ostate.get("remaining"),
                                   "used": ostate.get("used"), "source": ostate.get("source"),
-                                  "updated": props.get("updated")}})
+                                  "updated": props.get("updated")},
+                         "picks": picks_summary})
     return 0
 
 if __name__ == "__main__":

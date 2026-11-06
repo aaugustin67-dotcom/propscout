@@ -6,6 +6,8 @@
 <meta name="theme-color" content="#0b0f14">
 <title>PropScout · NFL prop research</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230b0f14'/><path d='M14 44 L26 30 L36 38 L50 20' stroke='%2322c55e' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -20,6 +22,7 @@
     <a href="#/favorites" data-r="favorites">Watchlist</a>
     <a href="#/injuries" data-r="injuries">Injuries</a>
     <a href="#/slip" data-r="slip">Slip <span class="badge" data-slipcount></span></a>
+    <a href="#/track" data-r="track">Track record</a>
     <a href="#/categories" data-r="categories">Categories</a>
     <a href="#/data" data-r="data">Data</a>
   </nav>
@@ -37,7 +40,7 @@
   <a href="#/slip" data-r="slip"><span>🧾</span>Slip <i class="badge" data-slipcount></i></a>
   <a href="#/more" data-r="more"><span>⋯</span>More</a>
 </nav>
-<footer class="foot">PropScout is a personal research tool. Not betting advice. Stats: nflverse · Injuries: ESPN · Lines: The Odds API (optional).</footer>
+<footer class="foot">PropScout is a personal research tool. Not betting advice. Stats: nflverse · Injuries: ESPN · Lines: Bovada + DraftKings (scraped, no key) · Dabble via The Odds API (optional).</footer>
 <div id="toast" class="toast" hidden></div>
 <script src="app.js"></script>
 </body>

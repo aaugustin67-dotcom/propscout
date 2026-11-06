@@ -57,16 +57,22 @@ const roundHalf = x => Math.floor(x)+0.5;
 
 /* ---------- load ---------- */
 async function getJSON(f, fallback){
-  try{ const r = await fetch((window.PS_DATA||'data/')+f+'?v='+Math.floor(Date.now()/600000)); if(!r.ok) throw new Error(r.status); return await r.json(); }
+  // No cache-buster by default: GitHub Pages revalidates with a 304, so a stale copy is
+  // at most ten minutes old and repeat visits are nearly free. Set window.PS_VER to force.
+  const v = window.PS_VER ? '?v='+window.PS_VER : '';
+  try{ const r = await fetch((window.PS_DATA||'data/')+f+v); if(!r.ok) throw new Error(r.status); return await r.json(); }
   catch(e){ console.warn('load fail', f, e); if(fallback!==undefined) return fallback; throw e; }
 }
 async function load(){
-  const [stats, games, inj, props, hist, status] = await Promise.all([
+  const [stats, games, inj, props, hist, status, picks] = await Promise.all([
     getJSON('stats.json'), getJSON('games.json'), getJSON('injuries.json',{items:[]}),
-    getJSON('props.json',{lines:[]}), getJSON('line_history.json',{}), getJSON('status.json',{})]);
-  Object.assign(S,{stats,games,inj,props,hist,status});
-  S.snaps = await getJSON('snaps.json',{}); S.cats = await getJSON('results.json',{cats:{}});
-  S.splits = await getJSON('splits.json',{games:[]}); S.splitBy={}; for(const g of S.splits.games||[]) S.splitBy[g.away+'@'+g.home] ??= g;
+    getJSON('props.json',{lines:[]}), getJSON('line_history.json',{}), getJSON('status.json',{}),
+    getJSON('picks.json',{entries:[],summary:{}})]);
+  Object.assign(S,{stats,games,inj,props,hist,status,picks});
+  // the remaining files in parallel, not one round trip after another
+  const [snaps, cats, splits] = await Promise.all([
+    getJSON('snaps.json',{}), getJSON('results.json',{cats:{}}), getJSON('splits.json',{games:[]})]);
+  S.snaps=snaps; S.cats=cats; S.splits=splits; S.splitBy={}; for(const g of S.splits.games||[]) S.splitBy[g.away+'@'+g.home] ??= g;
   const cols = stats.cols;
   S.players = stats.players;
   for(const g of games.games) S.gamesById[g.id]=g;
@@ -576,7 +582,7 @@ function bindCommon(root){
 function banner(){
   const el=$('#banner'), st=S.status||{}; let h='';
   const age = st.updated ? (Date.now()-new Date(st.updated))/3600000 : 99;
-  if(age>14) h+=`<div class="banner err">Data is ${Math.round(age)}h old — the scheduled refresh may be failing. See the Data page.</div>`;
+  if(age>8) h+=`<div class="banner err">Data is ${Math.round(age)}h old — the scheduled refresh may be failing, so these lines may be stale. Check the Data page before betting.</div>`;
   if(!S.hasBook && !sessionStorage.ps_nob) h+=`<div class="banner">No sportsbook lines loaded yet${st.odds?.has_key?' (odds fetch for upcoming games happens ~30h before kickoff)':' — free Bovada prop lines load on the next scheduled data refresh'}. Until then, props use <b>model lines</b> (the .5 line that splits the last 10 games ~50/50), so L10 hit rates near 50% are expected and matchup, trend and season form drive the ranking. <button class="btn" style="margin-left:6px" onclick="this.parentNode.remove();sessionStorage.ps_nob=1">Dismiss</button></div>`;
   el.innerHTML=h;
 }
@@ -1066,11 +1072,30 @@ function viewData(){
    <p><b>Player stats</b> — nflverse weekly player stats (free, no key), ${S.stats.season-2}–${S.stats.season}. Updated by nflverse overnight after games.</p>
    <p><b>Schedule & game lines</b> — nflverse games.csv (spread/total used for favorite/underdog split).</p>
    <p><b>Injuries</b> — ESPN public injuries feed; starters/key players from nflverse snap counts.</p><p><b>Betting splits</b> — DraftKings Sportsbook's free public splits page (dknetwork.draftkings.com): % bets and % handle for spread, total and moneyline. No free source publishes player-prop splits.</p>
-   <p><b>Prop lines</b> — The Odds API (free tier: 500 credits/month). Each upcoming game is fetched once ~30h before kickoff for 7 markets (~7 credits/game), which fits the free tier. Without a key the app uses model lines.</p>
+   <p><b>Prop lines</b> — Bovada's public NFL prop feed and DraftKings' public board, both scraped on every refresh with no key and no credits, so each card can show which apps carry it. The Odds API (optional, free tier: 500 credits/month) adds FanDuel/BetMGM/BetRivers, and its <code>us_dfs</code> region carries Dabble — that region doubles the cost per event, so it is dropped automatically if Dabble stops returning props. Only a slate with no posted props falls back to model lines.</p>
+   <p><b>Track record</b> — every refresh records the Top Picks with the home page's own score and grades them after the game, including closing-line value.</p>
    <p><b>Refresh schedule</b> — GitHub Actions at about 7 AM, 1 PM and 6 PM ET daily.</p></div>`;
 }
 function viewMore(){
-  return `<h1>More</h1><div class="card morelist" style="padding:0"><a href="#/trending">📈 Trending</a><a href="#/favorites">★ Watchlist</a><a href="#/injuries">🩹 Injury report</a><a href="#/categories">📊 Category hit rates</a><a href="#/data">⚙️ Data status</a><a href="${S.SPORT==='nfl'?'nhl/':'../'}">🔁 Switch to ${S.SPORT==='nfl'?'NHL':'NFL'}</a></div>`;
+  return `<h1>More</h1><div class="card morelist" style="padding:0"><a href="#/trending">📈 Trending</a><a href="#/favorites">★ Watchlist</a><a href="#/injuries">🩹 Injury report</a><a href="#/track">🎯 Track record</a><a href="#/categories">📊 Category hit rates</a><a href="#/data">⚙️ Data status</a><a href="${S.SPORT==='nfl'?'nhl/':'../'}">🔁 Switch to ${S.SPORT==='nfl'?'NHL':'NFL'}</a></div>`;
+}
+
+/* ----- track record: the picks the site recorded, graded after the game ----- */
+function viewTrack(){
+  const d=S.picks||{entries:[],summary:{}}, s=d.summary||{}, ent=d.entries||[];
+  const done=ent.filter(e=>e.result).sort((a,b)=>a.commence<b.commence?1:-1);
+  const pending=ent.filter(e=>!e.result).sort((a,b)=>a.commence<b.commence?-1:1);
+  const stat=(l,v,sub)=>`<div><span>${l}</span><b>${v}</b><span>${sub||''}</span></div>`;
+  const cell=e=>`<td>${e.commence?esc(e.commence.slice(5,10)):'–'}</td><td style="text-align:left"><a href="#/player/${e.pid}">${esc(e.player||'')}</a></td><td>${esc(MK[e.market]?.short||e.market)}</td><td>${e.market==='anytime_td'?'YES':(e.side>0?'O ':'U ')+e.line}</td><td>${e.price!=null?fmtOdds(e.price):'–'}</td><td>${e.score??'–'}</td><td><span class="pill ${e.result==='hit'?'g':e.result==='loss'?'r':'b'}">${esc(e.result||'pending')}</span></td><td>${e.value!=null?r1(e.value):'–'}</td><td>${e.close!=null?r1(e.close):'–'}</td><td>${e.clv!=null?(e.clv>0?'+':'')+r1(e.clv):'–'}</td><td>${e.pnl!=null?(e.pnl>0?'+':'')+r1(e.pnl):'–'}</td>`;
+  const table=rows=>rows.length?`<div class="tbl"><table><tr><th>Date</th><th>Player</th><th>Mkt</th><th>Pick</th><th>Price</th><th>Score</th><th>Result</th><th>Actual</th><th>Close</th><th>CLV</th><th>Units</th></tr>${rows.map(e=>`<tr>${cell(e)}</tr>`).join('')}</table></div>`:'<div class="empty card">Nothing here yet.</div>';
+  const bm=Object.entries(s.by_market||{});
+  return `<h1>Track record</h1>
+  <p class="sub">Every refresh records the site's Top Picks using the same score as the home page, then grades each one once the game is final. ${s.n||0} settled${pending.length?`, ${pending.length} still to play`:''}. A pick is graded at the line and price it was <b>first</b> recommended at, never a later, better one.</p>
+  <div class="kv">${stat('Record',`${s.hits||0}-${s.losses||0}${s.pushes?`-${s.pushes}P`:''}`,'hit / loss / push')}${stat('Hit rate',s.hit_rate!=null?pct(s.hit_rate):'–',`${s.staked||0} settled`)}${stat('Units',`${(s.units||0)>0?'+':''}${r1(s.units||0)}`,'flat 1-unit stakes')}${stat('ROI',s.roi!=null?`${s.roi>0?'+':''}${Math.round(s.roi*100)}%`:'–','at the recorded price')}${stat('Avg CLV',s.clv!=null?`${s.clv>0?'+':''}${r1(s.clv)}`:`${s.clv_n||0} picks with a close`)}${stat('Pending',pending.length,'not kicked off yet')}</div>
+  ${bm.length?`<h2>By market</h2><div class="tbl"><table><tr><th>Market</th><th>Record</th><th>Hit rate</th><th>Units</th><th>ROI</th><th>Avg CLV</th></tr>${bm.map(([m,x])=>`<tr><td>${esc(MK[m]?.label||m)}</td><td>${x.hits}-${x.losses}${x.pushes?`-${x.pushes}P`:''}</td><td>${x.hit_rate!=null?pct(x.hit_rate):'–'}</td><td>${x.units>0?'+':''}${r1(x.units||0)}</td><td>${x.roi!=null?`${x.roi>0?'+':''}${Math.round(x.roi*100)}%`:'–'}</td><td>${x.clv!=null?`${x.clv>0?'+':''}${r1(x.clv)}`:'–'}</td></tr>`).join('')}</table></div>`:''}
+  ${pending.length?`<h2>Still to play</h2>${table(pending.slice(0,25))}`:''}
+  <h2>Graded picks</h2>${table(done.slice(0,80))}
+  <p class="small mut">CLV = side × (closing line − our line), so a + means the line moved in our favour after the pick went up. Pushes and voided (did-not-play) picks pay 0 units. ${d.updated?`Updated ${ago(d.updated)}.`:''} A personal research log, not betting advice.</p>`;
 }
 
 /* ---------- search ---------- */
@@ -1104,6 +1129,7 @@ function route(){
     else if(r==='injuries'){ app.innerHTML=viewInjuries(); bindInj(); }
     else if(r==='data'){ app.innerHTML=viewData(); }
     else if(r==='categories'){ app.innerHTML=viewCategories(); }
+    else if(r==='track'){ app.innerHTML=viewTrack(); }
     else if(r==='more'){ app.innerHTML=viewMore(); }
     else app.innerHTML=`<div class="empty card">Page not found. <a href="#/">Go home</a></div>`;
   }catch(e){ console.error(e); app.innerHTML=`<div class="banner err">Something went wrong rendering this page: ${esc(e.message)}</div>`; }
@@ -1115,6 +1141,9 @@ document.addEventListener('DOMContentLoaded', async()=>{
   try{ await load(); banner(); route(); }
   catch(e){ console.error(e); $('#app').innerHTML=`<div class="banner err">Couldn't load data (${esc(e.message)}). The first data refresh may not have run yet — try again in a few minutes.</div>`; }
 });
+/* installable app: the service worker keeps the shell and the last data offline */
+if('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(()=>{});
+
 /* ⚠️ popover: hover on desktop, tap on mobile (cards clip overflow, so it's a fixed-position layer) */
 (function(){
   let tip=null, cur=null;

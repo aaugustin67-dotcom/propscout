@@ -1,0 +1,14 @@
+{
+  "name": "PropScout · NFL prop research",
+  "short_name": "PropScout",
+  "description": "NFL player prop research: hit rates, matchups, line comparison and a ranked board.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
