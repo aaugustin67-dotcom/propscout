@@ -24,11 +24,12 @@ Players listed Out/Doubtful/IR, players who missed their team's last two games, 
 | Weekly player stats 2024–current | [nflverse-data](https://github.com/nflverse/nflverse-data) `stats_player_week_<season>.csv` | No |
 | Schedule, spreads/totals | [nflverse/nfldata games.csv](https://github.com/nflverse/nfldata) | No |
 | Injuries | ESPN public injuries feed | No |
-| Player prop lines (DraftKings, FanDuel, BetMGM…) | [The Odds API](https://the-odds-api.com) free tier, 500 credits/month | **Yes – `ODDS_API_KEY`** |
+| Player prop lines (default) | [Bovada](https://www.bovada.lv/sports/football/nfl) public NFL prop feed — one JSON request per refresh, no key | No |
+| Extra books' prop lines (DraftKings, FanDuel, BetMGM…) | [The Odds API](https://the-odds-api.com) free tier, 500 credits/month | Optional – `ODDS_API_KEY` |
 
-Without the odds key the app still works: it uses **model lines** (the .5 line closest to a 50/50 split of the last 10 games).
+Without the odds key the app still shows **real sportsbook lines**: every refresh scrapes Bovada's public NFL prop feed once (no signup, no credits, no rate-limit budget) for passing yards, passing TDs, completions, rushing yards, receiving yards, receptions and anytime TD, keeping each player's least-vig (main) line. Only when a slate has no props posted yet does it fall back to **model lines** (the .5 line closest to a 50/50 split of the last 10 games).
 
-### Adding the odds key (free)
+### Adding more books (optional – The Odds API key)
 1. Sign up for the free Starter plan at https://the-odds-api.com/#get-access — the key is emailed to you.
 2. In this repo: **Settings → Secrets and variables → Actions → New repository secret**, name `ODDS_API_KEY`, paste the key.
 3. **Actions → Refresh data & deploy → Run workflow** (or wait for the next scheduled run).

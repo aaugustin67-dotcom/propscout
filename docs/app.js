@@ -561,7 +561,7 @@ function banner(){
   const el=$('#banner'), st=S.status||{}; let h='';
   const age = st.updated ? (Date.now()-new Date(st.updated))/3600000 : 99;
   if(age>14) h+=`<div class="banner err">Data is ${Math.round(age)}h old — the scheduled refresh may be failing. See the Data page.</div>`;
-  if(!S.hasBook && !sessionStorage.ps_nob) h+=`<div class="banner">No sportsbook lines loaded yet${st.odds?.has_key?' (odds fetch for upcoming games happens ~30h before kickoff)':' — add the free <b>ODDS_API_KEY</b> secret to load real lines'}. Until then, props use <b>model lines</b> (the .5 line that splits the last 10 games ~50/50), so L10 hit rates near 50% are expected and matchup, trend and season form drive the ranking. <button class="btn" style="margin-left:6px" onclick="this.parentNode.remove();sessionStorage.ps_nob=1">Dismiss</button></div>`;
+  if(!S.hasBook && !sessionStorage.ps_nob) h+=`<div class="banner">No sportsbook lines loaded yet${st.odds?.has_key?' (odds fetch for upcoming games happens ~30h before kickoff)':' — free Bovada prop lines load on the next scheduled data refresh'}. Until then, props use <b>model lines</b> (the .5 line that splits the last 10 games ~50/50), so L10 hit rates near 50% are expected and matchup, trend and season form drive the ranking. <button class="btn" style="margin-left:6px" onclick="this.parentNode.remove();sessionStorage.ps_nob=1">Dismiss</button></div>`;
   el.innerHTML=h;
 }
 function viewHome(){
@@ -792,7 +792,7 @@ function booksPanel(pid,m){
   const b=S.lines[pid+'|'+m];
   const h=S.hist[pid+'|'+m]||S.hist[norm(S.players[pid].name)+'|'+m]||[];
   let html=`<h2>Sportsbook odds</h2>`;
-  if(!b){ html+=`<div class="card small mut">No sportsbook lines loaded for this prop${S.status?.odds?.has_key?'':' (add ODDS_API_KEY to enable)'}. Using model line ${modelLine(pid,m)} (median of last 10).</div>`; return html; }
+  if(!b){ html+=`<div class="card small mut">No sportsbook lines loaded for this prop${S.status?.odds?.has_key?'':' (free Bovada lines load on the next data refresh)'}. Using model line ${modelLine(pid,m)} (median of last 10).</div>`; return html; }
   const yn = m==='anytime_td';
   // consensus no-vig at the main line (average of each book's de-vigged probability)
   const nv = b.books.filter(l=>l.line===b.line).map(l=>noVig(l.over,l.under)).filter(Boolean);

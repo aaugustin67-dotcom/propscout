@@ -287,6 +287,129 @@ def load_odds(upcoming, players_by_norm):
     note("odds", "ok", f"fetched {fetched} events; credits remaining {state.get('remaining')}")
     return props, state
 
+# ---------------- free prop lines (Bovada public feed: no key, no credits) ----------------
+BOVADA_URL = ("https://www.bovada.lv/services/sports/event/coupon/events/A/description/"
+              "football/nfl?marketFilterId=prop&preMatchOnly=true&lang=en")
+BOVADA_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+BOVADA_MARKETS = {  # Bovada market description prefix -> our key
+    "Total Passing Yards": "pass_yds", "Total Passing Touchdowns": "pass_tds",
+    "Total Completions": "completions", "Total Rushing Yards": "rush_yds",
+    "Total Receiving Yards": "rec_yds", "Total Receptions": "receptions",
+}
+BOVADA_TD = "Anytime Touchdown Scorer"
+
+def am_price(v):
+    s = str(v if v is not None else "").strip().upper()
+    if s in ("EVEN", "EV"): return 100
+    return int(s) if re.fullmatch(r"[+-]?\d+", s) else None
+
+def implied(am):
+    if am is None: return None
+    return 100.0 / (am + 100) if am > 0 else -am / (-am + 100)
+
+def prop_name(s):
+    """'Bijan Robinson (ATL)' / 'Kyle Pitts (ATL) - 1H' -> 'Bijan Robinson' / 'Kyle Pitts'."""
+    n = re.sub(r"\s*-\s*(1H|2H|1Q|2Q|3Q|4Q|1st Half|2nd Half|1st Quarter|2nd Quarter|3rd Quarter|4th Quarter)$",
+               "", (s or "").strip())
+    return re.sub(r"\s*\([A-Za-z]{2,3}\)\s*$", "", n).strip()
+
+def team_abbr(name):
+    if not name: return None
+    if name in TEAM_NAMES: return TEAM_NAMES[name]
+    nick = {n.split()[-1]: a for n, a in TEAM_NAMES.items()}
+    return nick.get(name.strip().split()[-1])
+
+def bovada_main_line(sides):
+    """Pick the book's main line from {handicap: {over, under}}: the two-way handicap closest to 50/50, then least vig."""
+    two = {h: v for h, v in sides.items() if v.get("over") is not None and v.get("under") is not None}
+    if not two: return None
+    def hold(kv):  # most balanced two-way line first, then the lowest vig
+        o, u = implied(kv[1]["over"]), implied(kv[1]["under"])
+        return (abs(o - u), abs((o + u) - 1)) if o is not None and u is not None else (9, 9)
+    h, s = min(two.items(), key=hold)
+    return h, s
+
+def load_odds_free(upcoming, players_by_norm):
+    """Real sportsbook player props from Bovada's public JSON feed - free, no key, no credit budget.
+    One request covers the whole slate. Writes the same props.json shape as the Odds API path."""
+    props = load_json(os.path.join(OUT, "props.json"), {"updated": None, "lines": []})
+    hist = load_json(os.path.join(OUT, "line_history.json"), {})
+    state = {"has_key": False, "source": "bovada", "remaining": None, "used": None}
+    try:
+        req = urllib.request.Request(BOVADA_URL, headers={"User-Agent": BOVADA_UA, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        note("odds_free", "error", f"bovada: {str(e)[:160]}")
+        return props, state
+    events = (data[0].get("events", []) if isinstance(data, list) and data else [])
+    slate = {(g["away"], g["home"]): g for g in upcoming}
+    # keep lines from other sources, drop yesterday's free lines
+    lines = [l for l in props.get("lines", []) if l.get("book") != "Bovada"
+             and l.get("commence") and datetime.fromisoformat(l["commence"].replace("Z", "+00:00")) > NOW - timedelta(hours=4)]
+    new, games = [], set()
+    for ev in events:
+        parts = (ev.get("description") or "").split(" @ ")
+        if len(parts) != 2: continue
+        away, home = team_abbr(parts[0]), team_abbr(parts[1])
+        g = slate.get((away, home))
+        if not g or not ev.get("startTime"): continue
+        commence = datetime.fromtimestamp(ev["startTime"] / 1000, timezone.utc).isoformat().replace("+00:00", "Z")
+        for grp in ev.get("displayGroups") or []:
+            for mk in grp.get("markets") or []:
+                if mk.get("status") != "O" or (mk.get("period") or {}).get("description") != "Game": continue
+                desc = mk.get("description") or ""
+                base = {"book": "Bovada", "event": g["id"], "commence": commence, "home": home, "away": away}
+                if desc == BOVADA_TD:  # yes/no market, line 0.5
+                    for o in mk.get("outcomes") or []:
+                        pn = prop_name(o.get("description"))
+                        price = am_price((o.get("price") or {}).get("american"))
+                        if o.get("type") != "X" or not pn or price is None or "Defense" in pn: continue
+                        new.append(dict(base, player=pn, pid=players_by_norm.get(norm(pn)), market="anytime_td",
+                                        line=0.5, over=price, under=None))
+                    continue
+                for label, market in BOVADA_MARKETS.items():
+                    if not desc.startswith(label + " - "): continue
+                    pn = prop_name(desc[len(label) + 3:])
+                    if not pn: continue
+                    sides = {}
+                    for o in mk.get("outcomes") or []:
+                        pr = o.get("price") or {}
+                        try:
+                            hp = float(pr.get("handicap"))
+                        except (TypeError, ValueError):
+                            continue
+                        d = sides.setdefault(hp, {"over": None, "under": None})
+                        if o.get("type") == "O": d["over"] = am_price(pr.get("american"))
+                        elif o.get("type") == "U": d["under"] = am_price(pr.get("american"))
+                    main = bovada_main_line(sides)
+                    if not main: continue
+                    hp, s = main
+                    new.append(dict(base, player=pn, pid=players_by_norm.get(norm(pn)), market=market,
+                                    line=int(hp) if float(hp).is_integer() else round(hp, 1),
+                                    over=s["over"], under=s["under"]))
+                    break
+        games.add(g["id"])
+    seen, out = set(), []
+    for r in new:  # one line per player+market
+        k = (r["pid"] or norm(r["player"]), r["market"])
+        if k in seen: continue
+        seen.add(k); out.append(r)
+    for r in out:
+        hk = f"{r['pid'] or norm(r['player'])}|{r['market']}"
+        h = hist.setdefault(hk, [])
+        if not h or h[-1][2] != r["line"]:  # only log a change, so the feed does not spam history
+            h.append([NOW.strftime("%Y-%m-%dT%H:%MZ"), "Bovada", r["line"]])
+    cutoff = (NOW - timedelta(days=14)).strftime("%Y-%m-%dT%H:%MZ")
+    hist = {k: [p for p in v if p[0] >= cutoff] for k, v in hist.items()}
+    hist = {k: v for k, v in hist.items() if v}
+    props = {"updated": NOW.isoformat() if out else props.get("updated"), "lines": lines + out}
+    save("props.json", props); save("line_history.json", hist)
+    note("odds_free", "ok" if out else "skipped",
+         f"Bovada: {len(out)} lines over {len(games)} games (free, no key)" if out else "no props posted yet")
+    return props, state
+
 # ---------------- betting splits (DraftKings Network public page, game lines only) ----------------
 DK_ABBR = {"LAR": "LA", "WSH": "WAS", "JAC": "JAX", "LVR": "LV"}
 def load_splits(eg="88808", out="splits.json", names=None, label="NFL"):
@@ -315,7 +438,9 @@ def load_splits(eg="88808", out="splits.json", names=None, label="NFL"):
             when = re.search(r"</h5>\s*<span[^>]*>([^<]+)</span>", b)
             g = {"away": away, "home": home, "when": when.group(1).strip() if when else None, "markets": {}}
             for mk in b.split('class="tb-se-head')[1:]:
-                name = strip(re.search(r'<div class="flex-1">(.*?)</div>', mk, re.S).group(1))
+                mname = re.search(r'<div class="flex-1">(.*?)</div>', mk, re.S)
+                if not mname: continue  # page markup without a market name: skip instead of failing the run
+                name = strip(mname.group(1))
                 rows = []
                 for r in mk.split('class="tb-sodd')[1:]:
                     lab = re.search(r'tb-slipline[^>]*>(.*?)</div>', r, re.S)
@@ -429,7 +554,13 @@ def main():
         if p["last"][0] == cur or pid not in by_norm.values():
             by_norm.setdefault(norm(p["name"]), pid)
     prev_count = len(load_json(os.path.join(OUT, "props.json"), {"lines": []}).get("lines", []))
-    props, ostate = load_odds(upcoming, by_norm)
+    # free real lines first: Bovada's public feed needs no key and has no credit budget
+    props, ostate = load_odds_free(upcoming, by_norm)
+    if os.environ.get("ODDS_API_KEY", "").strip():
+        # optional: add DraftKings/FanDuel/BetMGM prices on top of the free feed
+        props, kstate = load_odds(upcoming, by_norm)
+        if kstate.get("has_key"):
+            ostate = dict(kstate, source="bovada+" + (kstate.get("source") or "the-odds-api"))
     # grade stored real lines once games are final -> category base rates
     try:
         import grading
@@ -466,7 +597,8 @@ def main():
                          "players": len(players), "rows": sum(len(v) for v in logs.values()),
                          "upcoming": len(upcoming),
                          "odds": {"has_key": ostate.get("has_key", False), "remaining": ostate.get("remaining"),
-                                  "used": ostate.get("used"), "updated": props.get("updated")}})
+                                  "used": ostate.get("used"), "source": ostate.get("source"),
+                                  "updated": props.get("updated")}})
     return 0
 
 if __name__ == "__main__":
