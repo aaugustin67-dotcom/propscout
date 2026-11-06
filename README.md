@@ -7,6 +7,7 @@ Static site on GitHub Pages; data refreshed ~3×/day by GitHub Actions. No serve
 
 ## Features
 - **Top Picks (home)** — today's best props ranked by a transparent 0–100 score, with the reasons listed on each card.
+- **App availability** — every prop shows which apps post it (★ Dabble first, then the other books), the Board has an "Any app" filter, and the player page lists the apps carrying each market.
 - **Props board** — every passing / rushing / receiving / anytime-TD prop on this week's slate. Filter by market, position, game, team, side, hit-rate window & minimum, matchup (soft/neutral/tough D), injuries, book-lines-only. Sort by score, hit rate, cushion, matchup, kickoff.
 - **Player page** — market tabs, editable line + alt-line buttons (everything recomputes), Over/Under toggle, bar chart of last 20 games vs line, hit rates L3/L5/L10/season/H2H/home/away, splits (season, home/away, favorite/underdog, vs tough/soft defenses, vs opponent), full game log, teammate-out filter, matchup panel with both teams' injury reports, sportsbook line comparison & line movement.
 - **Defense vs Position** — yards/receptions/TDs allowed per game to QB/RB/WR/TE, ranked 1–32, heat-mapped, sortable.
@@ -26,6 +27,7 @@ Players listed Out/Doubtful/IR, players who missed their team's last two games, 
 | Injuries | ESPN public injuries feed | No |
 | Player prop lines (default) | [Bovada](https://www.bovada.lv/sports/football/nfl) public NFL prop feed — one JSON request per refresh, no key | No |
 | Second book | DraftKings public sportsbook API (scraped; browser TLS via `curl_cffi`, installed in CI) | No |
+| Dabble lines | via The Odds API `us_dfs` region (`dabble_us_dfs`); Dabble's own API is AU-geo-blocked | Optional – `ODDS_API_KEY` |
 | Extra books' prop lines (DraftKings, FanDuel, BetMGM…) | [The Odds API](https://the-odds-api.com) free tier, 500 credits/month | Optional – `ODDS_API_KEY` |
 
 Without the odds key the app still shows **real sportsbook lines**: every refresh scrapes Bovada's public NFL prop feed once (no signup, no credits, no rate-limit budget) for passing yards, passing TDs, completions, rushing yards, receiving yards, receptions and anytime TD, keeping each player's least-vig (main) line, plus **DraftKings**' public prop board as a second book so the consensus line and no-vig fair odds have two independent sources (DraftKings needs `pip install curl_cffi`; without it the build quietly falls back to Bovada only). Only when a slate has no props posted yet does it fall back to **model lines** (the .5 line closest to a 50/50 split of the last 10 games).

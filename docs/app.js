@@ -534,6 +534,22 @@ function priceStr(row, side){
   const b=row.book; if(!b) return `<span class="pill b" title="No sportsbook line loaded; line = median of last 10 games">model line</span>`;
   const x = side>0?b.bestO:b.bestU; return x?`<span class="pill">${fmtOdds(side>0?x.over:x.under)} ${esc(x.book)}</span>`:'';
 }
+const PRIMARY_APP = 'Dabble';   // the app this board is tuned for; shown first and highlighted
+function appsFor(pid,m){
+  const b=S.lines[pid+'|'+m]; if(!b||!b.books) return [];
+  const set=[...new Set(b.books.map(l=>l.book).filter(Boolean))];
+  return set.sort((x,y)=>(x===PRIMARY_APP?-1:y===PRIMARY_APP?1:0) || x.localeCompare(y));
+}
+function allApps(){
+  const set=new Set();
+  for(const b of Object.values(S.lines)) for(const l of (b.books||[])) if(l.book) set.add(l.book);
+  return [...set].sort((x,y)=>(x===PRIMARY_APP?-1:y===PRIMARY_APP?1:0) || x.localeCompare(y));
+}
+function appPill(name){ return `<span class="pill ${name===PRIMARY_APP?'g':'b'}" title="${name===PRIMARY_APP?'Your main app':'Sportsbook app'}">${name===PRIMARY_APP?'★ ':''}${esc(name)}</span>`; }
+function appsRow(pid,m){
+  const apps=appsFor(pid,m); if(!apps.length) return '';
+  return `<div class="row small mut" style="margin-top:8px;gap:5px;flex-wrap:wrap;align-items:center">On ${apps.map(appPill).join('')}</div>`;
+}
 function propCard(row, side, rank, x){
   const a = side>0?row.over.a:row.under.a, sc=score(a), p=row.p, M=MK[row.m];
   const sideTxt = row.m==='anytime_td' ? 'YES' : side>0?'OVER':'UNDER';
@@ -543,7 +559,7 @@ function propCard(row, side, rank, x){
     <div class="row">${headshot(p)}<div class="sp"><a class="pname" href="#/player/${row.pid}?m=${row.m}">${esc(p.name)}</a>${warnIcon(row.pid)}
       <div class="small mut">${p.pos} · ${p.team} ${a.isHome?'vs':'@'} ${a.opp} · ${fmtTime(row.g.ko)}</div></div>
       <button class="star ${fav?'on':''}" data-fav="${row.pid}|${row.m}|${row.line}|${side}" title="Watchlist">★</button></div>
-    <div class="row" style="margin-top:10px"><span class="side ${side>0?'o':'u'}">${sideTxt}</span><b class="big" style="font-size:18px">${row.m==='anytime_td'?'':row.line} ${M.label}</b><span class="sp"></span>${priceStr(row,side)}</div>
+    <div class="row" style="margin-top:10px"><span class="side ${side>0?'o':'u'}">${sideTxt}</span><b class="big" style="font-size:18px">${row.m==='anytime_td'?'':row.line} ${M.label}</b><span class="sp"></span>${priceStr(row,side)}</div>${appsRow(row.pid,row.m)}
     <div style="margin-top:10px">${hrChips(a)}</div>
     <div class="row small" style="margin-top:8px;flex-wrap:wrap;gap:6px">${dvpPill(a,p)} ${injPill(row.inj)} <span class="pill">L10 avg ${a.avgL10!=null?r1(a.avgL10):'–'}</span>${S.SPORT==='nfl'&&RECM.has(row.m)?(()=>{const t=a.games.slice(-5); return t.length?`<span class="pill b" title="Average targets, last ${t.length} games">Tgt L5 ${r1(avg(t.map(g=>g.targets||0)))}/g</span>`:'';})():''}${(()=>{const q=proj(a); return q?`<span class="pill ${(q.d*side)>0?'g':'r'}" title="Projection: recency-weighted L10 avg ${r1(q.wa)} × matchup ${q.mult.toFixed(2)}">Proj ${r1(q.v)} (${sgn(r1(q.d))})</span>`:'';})()}${a.streak>=3?`<span class="pill g">🔥 ${a.streak} straight</span>`:''}</div>
     ${kiCompact(row.pid)}
@@ -614,7 +630,7 @@ function propWithWhy(x, rank){
   const why = reasons(x.a, x.row.p).map(r=>`<li>${esc(r)}</li>`).join('');
   return card.replace(/<\/div>\s*$/, `<ul class="why">${why}</ul></div>`);
 }
-const BS = LS.get('boardf', {m:'all',pos:'all',team:'all',game:'all',side:'best',win:'L10',min:0,dvp:'all',sort:'score',hideInj:true,bookOnly:false,q:''});
+const BS = LS.get('boardf', {m:'all',pos:'all',team:'all',game:'all',side:'best',win:'L10',min:0,dvp:'all',app:'all',sort:'score',hideInj:true,bookOnly:false,q:''});
 let BN=60;
 function viewBoard(params){
   if(params?.get('game')){ BS.game=params.get('game'); BS.team='all'; }
@@ -633,6 +649,7 @@ function viewBoard(params){
     ${sel('bwin',[['L3','Hit% L3'],['L5','Hit% L5'],['L10','Hit% L10'],['SZN','Hit% season'],['H2H','Hit% H2H'],['VENUE','Hit% home/away']],BS.win)}
     ${sel('bmin',[[0,'Any hit%'],[.5,'≥50%'],[.6,'≥60%'],[.7,'≥70%'],[.8,'≥80%'],[1,'100%']],BS.min)}
     ${sel('bdvp',[['all','Any matchup'],['soft','Soft D (rank 22-32)'],['mid','Neutral'],['tough','Tough D (1-10)']],BS.dvp)}
+    ${sel('bapp',[['all','Any app'],...allApps().map(a=>[a,a===PRIMARY_APP?a+' ★':a])],BS.app)}
     <label class="row small"><input type="checkbox" id="binj" ${BS.hideInj?'checked':''}> Hide Out/Doubtful</label>
     <label class="row small"><input type="checkbox" id="bbook" ${BS.bookOnly?'checked':''} ${S.hasBook?'':'disabled'}> Book lines only</label>
   </div>${sortBar('bs')}${BS.game!=='all'?splitsCard(S.slate.find(g=>g.id===BS.game)):''}<div id="boardlist"></div>`;
@@ -644,6 +661,7 @@ function renderBoardList(){
     if(BS.m!=='all'&&r.m!==BS.m) continue; if(BS.pos!=='all'&&r.p.pos!==BS.pos) continue;
     if(BS.team!=='all'&&r.p.team!==BS.team) continue; if(BS.game!=='all'&&r.g.id!==BS.game) continue;
     if(BS.hideInj && r.inj && BAD_STATUS.test(r.inj.status)) continue; if(BS.bookOnly && r.src!=='book') continue;
+    if(BS.app!=='all' && !appsFor(r.pid,r.m).includes(BS.app)) continue;
     if(q && !norm(r.p.name).includes(q)) continue;
     const ln=SORTS[SORT.k].lean;
     const side = SORTS[SORT.k].side || (BS.side==='over'?1:BS.side==='under'?-1:(ln&&r.under?(leanSide(r.over.a,ln)??r.best.a.side):r.best.a.side));
@@ -658,11 +676,11 @@ function renderBoardList(){
   const total=rows.length; rows=rows.slice(0,BN);
   $('#boardlist').innerHTML = rows.length ? `<p class="small mut">${total} match${total===1?'':'es'}${total>BN?` · showing ${BN}`:''} <button class="btn" id="breset" style="margin-left:6px">Reset filters</button></p><div class="grid g3">${rows.map(x=>propCard(x.r,x.side,0,x)).join('')}</div>${total>BN?`<div style="text-align:center;margin-top:14px"><button class="btn" id="bmore">Show more (${total-BN} left)</button></div>`:''}` : `<div class="empty card">No props match these filters. <button class="btn" id="breset">Reset filters</button></div>`;
   const mo=$('#bmore'); if(mo) mo.onclick=()=>{BN+=60; renderBoardList();};
-  $('#breset').onclick=()=>{Object.assign(BS,{m:'all',pos:'all',team:'all',game:'all',side:'best',win:'L10',min:0,dvp:'all',sort:'score',hideInj:true,bookOnly:false,q:''}); LS.set('boardf',BS); SORT={k:'score',dir:-1}; LS.set('sort',SORT); route();};
+  $('#breset').onclick=()=>{Object.assign(BS,{m:'all',pos:'all',team:'all',game:'all',side:'best',win:'L10',min:0,dvp:'all',app:'all',sort:'score',hideInj:true,bookOnly:false,q:''}); LS.set('boardf',BS); SORT={k:'score',dir:-1}; LS.set('sort',SORT); route();};
   bindCommon($('#boardlist'));
 }
 function bindBoard(){
-  const map={bq:'q',bm:'m',bpos:'pos',bgame:'game',bteam:'team',bside:'side',bwin:'win',bmin:'min',bdvp:'dvp'};
+  const map={bq:'q',bm:'m',bpos:'pos',bgame:'game',bteam:'team',bside:'side',bwin:'win',bmin:'min',bdvp:'dvp',bapp:'app'};
   const rb=()=>{ $('#bs').outerHTML=sortBar('bs'); bindSortBar('bs', rb); renderBoardList(); }; bindSortBar('bs', rb);
   for(const [id,k] of Object.entries(map)){ const el=$('#'+id); el.oninput=el.onchange=()=>{BS[k]=el.value; LS.set('boardf',BS); renderBoardList();}; }
   $('#binj').onchange=e=>{BS.hideInj=e.target.checked; LS.set('boardf',BS); renderBoardList();};
@@ -792,6 +810,8 @@ function booksPanel(pid,m){
   const b=S.lines[pid+'|'+m];
   const h=S.hist[pid+'|'+m]||S.hist[norm(S.players[pid].name)+'|'+m]||[];
   let html=`<h2>Sportsbook odds</h2>`;
+  { const apps=appsFor(pid,m);
+    if(apps.length) html+=`<div class="card small" style="margin-bottom:8px">This prop is on ${apps.map(appPill).join(' ')} <span class="mut">— ${apps.length} app${apps.length>1?'s':''} posting it</span></div>`; }
   if(!b){ html+=`<div class="card small mut">No sportsbook lines loaded for this prop${S.status?.odds?.has_key?'':' (free Bovada lines load on the next data refresh)'}. Using model line ${modelLine(pid,m)} (median of last 10).</div>`; return html; }
   const yn = m==='anytime_td';
   // consensus no-vig at the main line (average of each book's de-vigged probability)
@@ -800,7 +820,7 @@ function booksPanel(pid,m){
   const bestAt = {}; for(const l of b.books){ const k=l.line; bestAt[k] ??= {o:null,u:null};
     if(l.over!=null && (bestAt[k].o==null || toDec(l.over)>toDec(bestAt[k].o))) bestAt[k].o=l.over;
     if(l.under!=null && (bestAt[k].u==null || toDec(l.under)>toDec(bestAt[k].u))) bestAt[k].u=l.under; }
-  const lines=[...b.books].sort((x,y)=>(x.line!==b.line)-(y.line!==b.line) || x.line-y.line || x.book.localeCompare(y.book));
+  const lines=[...b.books].sort((x,y)=>(x.book===PRIMARY_APP?0:1)-(y.book===PRIMARY_APP?0:1) || (x.line!==b.line)-(y.line!==b.line) || x.line-y.line || x.book.localeCompare(y.book));
   const ev = (price, q) => price==null||q==null ? '' : (()=>{ const e=q*toDec(price)-1; return `<div class="small ${e>0?'evp':'mut'}">${e>0?'+':''}${(e*100).toFixed(1)}% EV</div>`; })();
   html+=`<div class="card small" style="margin-bottom:8px">${nv.length?`Consensus no-vig at <b>${b.line}</b> (${nv.length} book${nv.length>1?'s':''}): ${yn?'Yes':'Over'} <b>${pct(cO)}</b> (fair ${fmtOdds(fairAm(cO))})${yn?'':` · Under <b>${pct(1-cO)}</b> (fair ${fmtOdds(fairAm(1-cO))})`}. EV below is each price vs this consensus fair probability.`:`Books only posted one side${yn?' (Yes only, typical for anytime TD)':''}, so no-vig fair odds can't be computed — implied probability shown instead.`}</div>
   <div class="tbl"><table class="odds"><tr><th>Book</th><th>Line</th><th>${yn?'Yes':'Over'}</th><th>Impl.</th>${yn?'':'<th>Under</th><th>Impl.</th>'}<th class="hide-m">Hold</th><th>Fair ${yn?'Y':'O'}/${yn?'N':'U'}</th></tr>${lines.map(l=>{

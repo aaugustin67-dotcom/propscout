@@ -234,7 +234,8 @@ def load_odds(upcoming, players_by_norm):
         if state.get("remaining") is not None and int(state["remaining"]) < min_left:
             note("odds", "budget", f"only {state['remaining']} credits left - skipping")
             break
-        url = (f"{base}/events/{ev['id']}/odds?apiKey={key}&regions=us&oddsFormat=american"
+        regions = os.environ.get("ODDS_REGIONS", "us,us_dfs")  # us_dfs carries Dabble + DraftKings Pick6 props
+        url = (f"{base}/events/{ev['id']}/odds?apiKey={key}&regions={regions}&oddsFormat=american"
                f"&markets={','.join(nfl_markets())}")
         try:
             raw, hdr = fetch(url)
