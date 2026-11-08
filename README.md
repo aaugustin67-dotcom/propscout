@@ -13,11 +13,11 @@ Static site on GitHub Pages; data refreshed ~3×/day by GitHub Actions. No serve
 - **Player page** — market tabs, editable line + alt-line buttons (everything recomputes), Over/Under toggle, bar chart of last 20 games vs line, hit rates L3/L5/L10/season/H2H/home/away, splits (season, home/away, favorite/underdog, vs tough/soft defenses, vs opponent), full game log, teammate-out filter, matchup panel with both teams' injury reports, sportsbook line comparison & line movement.
 - **Defense vs Position** — yards/receptions/TDs allowed per game to QB/RB/WR/TE, ranked 1–32, heat-mapped, sortable.
 - **Trending** — longest active streaks vs the line, usage trending up/down (last 3 vs season).
-- **Watchlist** (★) and **Slip builder** (parlay odds from best prices, naive hit probability, copy to clipboard). Saved in your browser.
+- **Watchlist** (★) and **Slip builder** (parlay odds from best prices, naive hit probability, copy to clipboard, plus a **fade grid**: every single-leg fade and every two-leg fade of the slip, each with its own odds, hit rate and copy button). Saved in your browser.
 - **Injury report** and **Data status** pages.
 
 ## The score
-`25% L10 hit rate + 20% L5 + 15% season + 10% head-to-head (season rate if <2 meetings) + 15% cushion (L10 avg vs line) + 15% matchup (opponent's defense-vs-position rank)`.
+`18% L10 hit rate + 14% L5 + 11% season + 6% head-to-head (season rate if <2 meetings) + 11% cushion (L10 avg vs line) + 30% matchup (opponent's defense-vs-position rank) + 10% category base rate` — matchup is the heaviest input, and key injuries move the score up to ±18.
 Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded.
 
 ## Data sources (all free)

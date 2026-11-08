@@ -100,7 +100,7 @@ const KI_PTS = {
   own:{ QB:{WR:-2.5,TE:-1.5,OL:-2}, RB:{RB:+6,OL:-2}, WR:{WR:+4,TE:+2,QB:-6}, TE:{TE:+4,WR:+2.5,QB:-6} },
   opp:{ QB:{DL:+1.5,CB:+2.5,S:+1.5}, RB:{DL:+2,LB:+2}, WR:{CB:+4,S:+1.5}, TE:{LB:+2.5,S:+2.5} },
 };
-const KI_CAP = 12, KI_SELF_Q = -6;  // his own Questionable tag: -6 on either side (risk he sits or is limited)
+const KI_CAP = 18, KI_SELF_Q = -9, KI_SCALE = 1.5;  // injuries weigh ~1.5x the original table: bigger swings, capped at +-18
 const KI_LAB = {own:'teammate', opp:'defender'};
 const kiW = st => /^(questionable|day-to-day)/i.test(st||'') ? .4 : 1;
 const kiShort = st => /^injured/i.test(st)?'IR':/^out/i.test(st)?'Out':/^doubt/i.test(st)?'D':/^quest/i.test(st)?'Q':/^day/i.test(st)?'DTD':st;
@@ -114,7 +114,7 @@ function keyInj(pid){
   if(!p || !KI_OWN[pos]) return (_ki[pid]=res);
   const pick=(team, grps, side)=>(S.injByTeam[team]||[]).filter(i=>i.key && grps.includes(i.grp) && KI_STATUS.test(i.status||'')
       && !(side==='own' && norm(i.name)===norm(p.name)))
-    .map(i=>({...i, side, pts: i.fresh ? (KI_PTS[side][pos][i.grp]||0)*kiW(i.status) : 0}))
+    .map(i=>({...i, side, pts: i.fresh ? (KI_PTS[side][pos][i.grp]||0)*KI_SCALE*kiW(i.status) : 0}))
     .sort((a,b)=>Math.abs(b.pts)-Math.abs(a.pts) || (b.snap||0)-(a.snap||0));
   res.own = pick(p.team, KI_OWN[pos], 'own');
   if(st) res.opp = pick(st.opp, KI_OPP[pos], 'opp');
@@ -143,7 +143,7 @@ function kiPanel(pid){
   return `<h2>Key injuries</h2><div class="grid g2">
    <div class="card"><div class="small mut" style="margin-bottom:4px">${p.team} at ${KI_OWN[pos].join('/')} (usage & volume)</div>${list(k.own,'own')}</div>
    <div class="card"><div class="small mut" style="margin-bottom:4px">${opp?opp+' defense':'Opponent'} at ${KI_OPP[pos].join('/')} (who covers him)</div>${opp?list(k.opp,'opp'):'<div class="mut small">No game this week</div>'}</div></div>
-   <p class="small mut">Key = season snap share above a starter threshold (nflverse snap counts). Score adjustment for the Over (reversed for the Under): ${k.pts>0?'+':''}${k.pts} pts${k.self?`, plus ${k.self} because he is listed ${esc(k.selfSt)}`:''}, from fresh absences only — players already out for weeks are labeled long-term because his recent stats already reflect them. Questionable teammates/defenders count 40%. Capped at ±12.</p>`;
+   <p class="small mut">Key = season snap share above a starter threshold (nflverse snap counts). Score adjustment for the Over (reversed for the Under): ${k.pts>0?'+':''}${k.pts} pts${k.self?`, plus ${k.self} because he is listed ${esc(k.selfSt)}`:''}, from fresh absences only — players already out for weeks are labeled long-term because his recent stats already reflect them. Questionable teammates/defenders count 40%. Capped at ±18.</p>`;
 }
 
 /* ---------- defense vs position ---------- */
@@ -332,10 +332,12 @@ function matchup(a){
   return (_mu[k]={part, grade, pts:r1(W.MATCH*(part-.5)*100), comps, rest:adjTxt});
 }
 
-/* Transparent score (0-100):
-   25% L10 hit rate + 20% L5 + 15% season + 10% H2H (season if <2 H2H games)
-   + 15% cushion (avg of last 10 vs line, scaled) + 15% matchup (opponent's rank allowing this stat to this position). */
-const W = {L10:.20, L5:.16, SZN:.12, H2H:.07, EDGE:.13, MATCH:.22, CAT:.10};
+/* Transparent score (0-100): matchup is the heaviest input, so scheme and opponent
+   matter more than a hot streak.
+   18% L10 hit rate + 14% L5 + 11% season + 6% H2H (season if <2 H2H games)
+   + 11% cushion (avg of last 10 vs line, scaled) + 30% matchup (opponent's rank allowing this stat to this position)
+   + 10% category base rate. */
+const W = {L10:.18, L5:.14, SZN:.11, H2H:.06, EDGE:.11, MATCH:.30, CAT:.10};
 /* Category base rate (market x side): published prior blended with our own graded results.
    rate = (prior*N0 + hits) / (N0 + hits + misses); factor = 0.5 + (rate-0.5)*5, so a 54% category is worth ~+2 pts. */
 const CAT_N0 = 200;
@@ -610,7 +612,7 @@ function viewHome(){
   return `<h1>Today's Top Picks</h1>
   <p class="sub">${slateTxt}. ${SORT.k==='score'?'Ranked by the PropScout score':'Sorted by '+SORTS[SORT.k].l.toLowerCase()+(SORT.dir<0?' (high → low)':' (low → high)')} — every input is shown so you can judge it yourself.</p>
   <details class="card small" style="margin-bottom:14px"><summary style="cursor:pointer;font-weight:700">How the score works</summary>
-   <p class="mut">Score (0–100) = 20% last-10 hit rate + 16% last-5 + 12% season + 7% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 13% cushion (last-10 average vs the line) + 22% matchup (graded A–F: defense vs position season 35% and recent 20%, game environment from implied team total & game script 20%, pace 10%, pass rush / opposing goalie 15%, NHL rest) + 10% category base rate (how often this market's Overs or Unders hit: a published prior blended with our own graded lines, see <a href="#/categories" style="color:var(--green)">Category hit rates</a>). Then a <b>key-injury adjustment</b> (capped ±12): +4 per starting WR teammate out (WR/TE), +6 when the other lead RB is out, −6 when his QB is out, −2 per starting OL out (RB/QB), +4 when the opponent's starting CB is out (WR), +2.5 for a starting LB/S out (TE); teammates/defenders listed Questionable count 40% and only fresh absences count; −6 if he himself is Questionable. It's listed in each pick's reasons, and ⚠️ next to a name shows the key injuries around him. Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
+   <p class="mut">Score (0–100) = 18% last-10 hit rate + 14% last-5 + 11% season + 6% head-to-head vs this opponent (season rate if fewer than 2 meetings) + 11% cushion (last-10 average vs the line) + 30% matchup (graded A–F: defense vs position season 35% and recent 20%, game environment from implied team total & game script 20%, pace 10%, pass rush / opposing goalie 15%, NHL rest) + 10% category base rate (how often this market's Overs or Unders hit: a published prior blended with our own graded lines, see <a href="#/categories" style="color:var(--green)">Category hit rates</a>). Then a <b>key-injury adjustment</b> (capped ±18): +6 per starting WR teammate out (WR/TE), +9 when the other lead RB is out, −9 when his QB is out, −3 per starting OL out (RB/QB), +6 when the opponent's starting CB is out (WR), +3.75 for a starting LB/S out (TE); teammates/defenders listed Questionable count 40% and only fresh absences count; −9 if he himself is Questionable. It's listed in each pick's reasons, and ⚠️ next to a name shows the key injuries around him. Players listed Out/Doubtful/IR, players who missed their team's last two games, and games already started are excluded. Max two props per player.</p></details>
   ${slateStrip()}
   ${(S.splits.games||[]).length?`<details class="card small" style="margin-bottom:12px"><summary style="cursor:pointer;font-weight:700">📊 Betting splits (% bets / % money) for this week's games</summary><div class="grid g2" style="margin-top:10px">${S.slate.map(g=>splitsCard(g,true)).join('')}</div></details>`:''}
   <div class="tabs" id="htabs">${[['all','All'],['over','Overs'],['under','Unders'],...BOARD_MK.map(m=>[m,MK[m].label])].map(([k,l])=>`<button data-h="${k}" class="${HS.f===k?'on':''}">${l}</button>`).join('')}</div>
@@ -981,15 +983,38 @@ let SMODE = LS.get('smode','book'); // book | prizepicks | dabble
 const PK_STAT = {pass_yds:'Pass Yards', pass_tds:'Pass TDs', completions:'Pass Completions', rush_yds:'Rush Yards', rec_yds:'Receiving Yards',
   receptions:'Receptions', anytime_td:'Rush+Rec TDs', rush_rec_yds:'Rush+Rec Yds', pass_att:'Pass Attempts', rush_att:'Rush Attempts', targets:'Targets', ints:'INTs Thrown'};
 const legLine = s => SMODE==='book' ? s.line : (s.pk?.[SMODE] ?? s.line);
-function slipText(){
+function slipText(legs=SLIP){
   const app=APPS[SMODE];
-  if(!app) return SLIP.map(s=>`${S.players[s.pid]?.name} ${s.m==='anytime_td'?'Anytime TD':(s.side>0?'Over ':'Under ')+s.line+' '+MK[s.m].label}`).join('\n');
-  return `${app.name} picks (PropScout)\n` + SLIP.map((s,i)=>{const p=S.players[s.pid]; const st=S.slateTeam[p?.team];
+  if(!app) return legs.map(s=>`${S.players[s.pid]?.name} ${s.m==='anytime_td'?'Anytime TD':(s.side>0?'Over ':'Under ')+s.line+' '+MK[s.m].label}`).join('\n');
+  return `${app.name} picks (PropScout)\n` + legs.map((s,i)=>{const p=S.players[s.pid]; const st=S.slateTeam[p?.team];
     return `${i+1}. ${p?.name} (${p?.team}${st?` ${st.home?'vs':'@'} ${st.opp}`:''}) — ${PK_STAT[s.m]||MK[s.m].label} ${s.side>0?app.more:app.less} ${legLine(s)}`;}).join('\n');
+}
+/* ----- fade permutations -----
+   A fade slip is this slip with one leg flipped to its other side at the same line, every other
+   leg untouched; then the same with every pair of legs flipped. Legs that cannot flip (anytime
+   TD has no other side) are left out of the grid. */
+const CAN_FLIP = s => s.m!=='anytime_td';
+function flipLegs(idx){ return SLIP.map((s,i)=> idx.includes(i) && CAN_FLIP(s) ? {...s, side:-s.side} : {...s}); }
+function fadeSlips(){
+  const ok=[...SLIP.keys()].filter(i=>CAN_FLIP(SLIP[i])), out=[];
+  for(const i of ok) out.push({f:[i], legs:flipLegs([i])});
+  for(let x=0;x<ok.length;x++) for(let y=x+1;y<ok.length;y++) out.push({f:[ok[x],ok[y]], legs:flipLegs([ok[x],ok[y]])});
+  return out;
+}
+function legsOut(legs, pk){   // parlay decimal odds (book mode only) + naive L10 probability
+  let dec=1, priced=true, prob=1;
+  for(const s of legs){ const line = SMODE==='book' ? s.line : (s.pk?.[SMODE] ?? s.line);
+    const a=analyze(s.pid,s.m,line,s.side); prob *= (a.L10?.r ?? .5);
+    const b=S.lines[s.pid+'|'+s.m];
+    const best = !pk && b && b.line===s.line ? (s.side>0?b.bestO:b.bestU) : null;
+    const price = best ? (s.side>0?best.over:best.under) : null;
+    if(price!=null) dec*=toDec(price); else priced=false; }
+  return {dec, priced, prob};
 }
 function viewSlip(){
   if(!SLIP.length) return `<h1>Slip</h1><div class="empty card">Your slip is empty. Add props with “+ Slip”.</div>`;
   const pk = SMODE!=='book', app=APPS[SMODE];
+  const FADES = SLIP.length>1 ? fadeSlips() : [], fstake = Math.max(0, +(LS.get('fadestake',1)||0));
   let dec=1, priced=true, prob=1;
   const items=SLIP.map((s,i)=>{const p=S.players[s.pid]; if(!p) return ''; const line=legLine(s); const a=analyze(s.pid,s.m,line,s.side); const b=S.lines[s.pid+'|'+s.m];
     const best = !pk && b && b.line===s.line ? (s.side>0?b.bestO:b.bestU) : null; const price = best ? (s.side>0?best.over:best.under) : null;
@@ -1017,6 +1042,13 @@ function viewSlip(){
      ${pk?'':`<button class="btn" data-sm2="prizepicks">→ PrizePicks</button><button class="btn" data-sm2="dabble">→ Dabble</button>`}
      <button class="btn" id="clearslip">Clear</button></div>
    ${pk?`<p class="small mut">No verified deep link pre-fills ${esc(app.name)} picks from outside the app, so this copies your slip and opens ${esc(app.name)}${SMODE==='prizepicks'?' (the app opens if installed, otherwise the web board)':' (app-only in the US: install it from your app store if the site doesn\'t hand off)'} — add each leg there from the list.</p>`:''}
+   ${FADES.length?`<h2 style="margin-top:18px">Fade permutations</h2>
+   <p class="small mut" style="margin-top:0">This slip with one leg flipped, then with every pair flipped, at the same lines: <b>${FADES.length} slips</b> from ${SLIP.length} legs${pk?` (hit rate only — ${esc(app.name)} lines are typed in by hand)`:''}.</p>
+   <div class="row" style="gap:10px;flex-wrap:wrap;margin-bottom:8px"><label class="row small" style="gap:6px">Stake each <input id="fadestake" type="number" min="0" step="0.5" value="${fstake}" style="width:76px"> u</label>
+     <b id="fadeout">${r1(fstake*FADES.length)}u total across ${FADES.length} slips</b><span class="sp"></span><button class="btn" id="copyfades">Copy all slips</button></div>
+   <div class="tbl"><table id="fadetbl"><tr><th>Faded</th>${pk?'':'<th>Parlay odds</th>'}<th>Naive L10</th><th>Returns at stake</th><th></th></tr>
+   ${FADES.map((f,k)=>{const o=legsOut(f.legs,pk); return `<tr data-dec="${o.priced?o.dec:''}"><td>${f.f.map(i=>`<b>${esc(S.players[SLIP[i].pid]?.name||'')}</b>`).join(' + ')}</td>${pk?'':`<td>${o.priced?fmtOdds(toAm(o.dec)):'<span class="mut">–</span>'}</td>`}<td>${pct(o.prob)}</td><td data-ret>${o.priced?r1(fstake*o.dec)+'u':'–'}</td><td><button class="btn sm" data-copyfade="${k}">Copy</button></td></tr>`;}).join('')}</table></div>
+   <p class="small mut">Every slip keeps the legs you did not fade, so they overlap and win or lose together — the grid spreads exposure rather than hedging it. Pair fades are longshots by construction, and the naive column multiplies last-10 hit rates while ignoring correlation.</p>`:''}
    <pre class="card small" id="slipprev" style="white-space:pre-wrap;margin-top:10px">${esc(slipText())}</pre>`;
 }
 const hrMini = x => x ? `<span class="chip ${cls(x.r)}" style="flex-direction:row;gap:4px"><b>${pct(x.r)}</b><span class="small">${x.h}/${x.n}</span></span>` : '–';
@@ -1030,6 +1062,15 @@ function bindSlip(){
   const o=$('#openapp'); if(o) o.onclick=async()=>{ await copyText(slipText()); toast('Slip copied — opening '+APPS[SMODE].name); setTimeout(()=>window.open(APPS[SMODE].url,'_blank','noopener'),350); };
   const sh=$('#shareslip'); if(sh) sh.onclick=async()=>{ try{ await navigator.share({title:'PropScout slip', text:slipText()}); }catch(e){} };
   const x=$('#clearslip'); if(x) x.onclick=()=>{SLIP=[]; LS.set('slip',SLIP); updSlipCount(); route();};
+  const FADES = SLIP.length>1 ? fadeSlips() : [];
+  const fs=$('#fadestake'); if(fs) fs.oninput=()=>{ const v=Math.max(0,+fs.value||0); LS.set('fadestake',v);
+    $$('#fadetbl tr[data-dec]').forEach(tr=>{ const d=+tr.dataset.dec, c=tr.querySelector('[data-ret]'); if(c) c.textContent = d ? r1(v*d)+'u' : '–'; });
+    const out=$('#fadeout'); if(out) out.textContent = `${r1(v*FADES.length)}u total across ${FADES.length} slips`; };
+  const fadeHead = f => `Fade ${f.f.map(i=>S.players[SLIP[i].pid]?.name||'').join(' + ')}\n`;
+  const cf=$('#copyfades'); if(cf) cf.onclick=async()=>{ const txt=FADES.map((f,k)=>`#${k+1} ${fadeHead(f).trim()}\n`+slipText(f.legs)).join('\n\n');
+    toast(await copyText(txt)?`${FADES.length} slips copied`:'Copy failed'); };
+  $$('[data-copyfade]').forEach(b=>b.onclick=async()=>{ const f=FADES[+b.dataset.copyfade]; if(!f) return;
+    toast(await copyText(fadeHead(f)+slipText(f.legs))?'Slip copied':'Copy failed'); });
 }
 
 /* ----- injuries ----- */

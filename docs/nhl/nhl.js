@@ -24,7 +24,7 @@ Object.assign(KI_OWN, {F:['F','D'], D:['D','F'], G:['D']});
 Object.assign(KI_OPP, {F:['G','D'], D:['G','D'], G:['F']});
 
 /* Hockey injury factor (points on 0-100, for the Over; reversed for the Under). Fresh absences only;
-   Day-To-Day / Questionable count 40%. Capped at +-12; -6 if he himself is DTD/Questionable. */
+   Day-To-Day / Questionable count 40%. Capped at +-18; -9 if he himself is DTD/Questionable. */
 const NHL_KI = {
   skater:{ ownKey:+2,    // top-6 F / top-4 D teammate out: more TOI and PP time
            ownPP1:-1.5,  // PP1 teammate out: weaker power play (applied on top of ownKey)
@@ -43,7 +43,7 @@ function keyInj(pid){
       if(i.fresh){ if(isG){ if(side==='opp'&&i.grp==='F') v=NHL_KI.goalie.oppF; if(side==='own'&&i.grp==='D') v=NHL_KI.goalie.ownD; }
         else if(side==='own'){ if(i.grp!=='G') v=NHL_KI.skater.ownKey+(i.pp1?NHL_KI.skater.ownPP1:0); }
         else { if(i.grp==='G') v=NHL_KI.skater.oppG; else if(i.grp==='D') v=NHL_KI.skater.oppD; } }
-      return {...i, side, pts:v*kiW(i.status)}; })
+      return {...i, side, pts:v*KI_SCALE*kiW(i.status)}; })
     .sort((a,b)=>Math.abs(b.pts)-Math.abs(a.pts));
   res.own=pick(p.team, KI_OWN[p.pos]||[], 'own'); if(st) res.opp=pick(st.opp, KI_OPP[p.pos]||[], 'opp');
   let t=0; for(const i of [...res.own,...res.opp]) t+=i.pts;
@@ -149,8 +149,8 @@ function viewData(){
    <p><b>Refresh schedule</b> — about 7 AM, 1 PM and 6 PM ET daily.</p></div>`;
 }
 const _viewHome = viewHome;
-viewHome = () => _viewHome().replace(/Then a <b>key-injury adjustment<\/b>[\s\S]*?−6 if he himself is Questionable\./,
-  'Then a <b>key-injury adjustment</b> (capped ±12): +2 per top-6 F / top-4 D teammate out (more TOI), −1.5 more if that teammate is on PP1, +5 when the opposing starting goalie is out, +2.5 per opposing top-4 D out; for goalie props −2 per opposing top-6 F out and +2.5 per own top-4 D out. Day-To-Day/Questionable count 40%, only fresh absences count, −6 if he himself is Day-To-Day.')
+viewHome = () => _viewHome().replace(/Then a <b>key-injury adjustment<\/b>[\s\S]*?−9 if he himself is Questionable\./,
+  'Then a <b>key-injury adjustment</b> (capped ±18): +3 per top-6 F / top-4 D teammate out (more TOI), −2.25 more if that teammate is on PP1, +7.5 when the opposing starting goalie is out, +3.75 per opposing top-4 D out; for goalie props −3 per opposing top-6 F out and +3.75 per own top-4 D out. Day-To-Day/Questionable count 40%, only fresh absences count, −9 if he himself is Day-To-Day.')
   .replace('Players listed Out/Doubtful/IR, players who missed their team\'s last two games, and games already started are excluded.','Players listed Out/IR, players who missed their team\'s last two games, and games already started are excluded.');
 Object.assign(DS, {pos:'F', sort:'sog'});
 /* 0.5 model lines (points/goals/assists/blocks) are lopsided and their real price would be heavily juiced,
