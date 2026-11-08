@@ -1,8 +1,10 @@
 /* PropScout service worker: offline shell + last-known data.
-   Shell is cache-first (it only changes when the cache name changes); data files
-   are network-first so a refresh is always attempted, falling back to the last
-   copy we saw when you are offline or on a bad connection. */
-const CACHE = 'propscout-v1';
+   Everything is network-first now. The shell used to be cache-first under a fixed
+   cache name, so a returning visit (or the installed home-screen app) kept serving
+   the app.js it cached days ago and never saw a deploy. Network-first means an
+   online visit always gets the current shell, and the cache is only a fallback for
+   offline / bad connections. Bump CACHE to force every client to refresh its shell. */
+const CACHE = 'propscout-v2';
 const SHELL = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest', './icon.svg'];
 
 self.addEventListener('install', e => {
@@ -21,34 +23,18 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== location.origin) return;
-
-  if (url.pathname.indexOf('/data/') !== -1) {
-    // network-first: data must stay current, but keep the last good copy
-    e.respondWith(
-      fetch(req)
-        .then(res => {
-          if (res && res.ok) {
-            const copy = res.clone();
-            caches.open(CACHE).then(c => c.put(req, copy));
-          }
-          return res;
-        })
-        .catch(() => caches.match(req))
-    );
-    return;
-  }
-
-  // shell and other static files: cache-first, refreshed in the background
-  e.respondWith(
-    caches.match(req).then(hit => {
-      const net = fetch(req).then(res => {
-        if (res && res.ok) {
-          const copy = res.clone();
-          caches.open(CACHE).then(c => c.put(req, copy));
-        }
-        return res;
-      }).catch(() => hit);
-      return hit || net;
-    })
-  );
+  e.respondWith(networkFirst(req));
 });
+
+async function networkFirst(req) {
+  const cache = await caches.open(CACHE);
+  try {
+    const res = await fetch(req);
+    if (res && res.ok) cache.put(req, res.clone());
+    return res;
+  } catch (err) {
+    const hit = await cache.match(req);
+    if (hit) return hit;
+    throw err;
+  }
+}

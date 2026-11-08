@@ -1183,7 +1183,16 @@ document.addEventListener('DOMContentLoaded', async()=>{
   catch(e){ console.error(e); $('#app').innerHTML=`<div class="banner err">Couldn't load data (${esc(e.message)}). The first data refresh may not have run yet — try again in a few minutes.</div>`; }
 });
 /* installable app: the service worker keeps the shell and the last data offline */
-if('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(()=>{});
+if('serviceWorker' in navigator && location.protocol === 'https:'){
+  // Update immediately (no HTTP cache for sw.js) and reload once when a new
+  // worker takes over, so a deploy is never hidden behind a stale cached shell.
+  const wasControlled = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if(wasControlled && !reloaded){ reloaded = true; location.reload(); }
+  });
+  navigator.serviceWorker.register('sw.js', {updateViaCache:'none'}).catch(()=>{});
+}
 
 /* ⚠️ popover: hover on desktop, tap on mobile (cards clip overflow, so it's a fixed-position layer) */
 (function(){
